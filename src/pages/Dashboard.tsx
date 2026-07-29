@@ -9,6 +9,7 @@ import { FileViewer } from "@/components/workspace/FileViewer";
 import { ChatPanel } from "@/components/workspace/ChatPanel";
 import { BuildConsole } from "@/components/workspace/BuildConsole";
 import { NewProjectDialog } from "@/components/workspace/NewProjectDialog";
+import { SafetyPanel } from "@/components/workspace/SafetyPanel";
 import { toast } from "sonner";
 import {
   LayoutDashboard,
@@ -16,6 +17,8 @@ import {
   LogOut,
   Cpu,
   Loader2,
+  RefreshCw,
+  ShieldCheck,
 } from "lucide-react";
 import { useNavigate } from "react-router";
 import { cn } from "@/lib/utils";
@@ -28,6 +31,7 @@ export default function Dashboard() {
   );
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [showSafety, setShowSafety] = useState(false);
 
   const seedKnowledgeBase = useMutation(api.knowledgeBase.seedKnowledgeBase);
 
@@ -39,9 +43,10 @@ export default function Dashboard() {
     }
   }, [user, seedKnowledgeBase]);
 
-  const projects = useQuery(api.projects.list, {
-    userId: user?._id ?? ("" as never),
-  });
+  const projects = useQuery(
+    api.projects.list,
+    user ? { userId: user._id } : "skip",
+  );
   const selectedProject = useQuery(
     api.projects.get,
     selectedProjectId ? { projectId: selectedProjectId as never } : "skip",
@@ -61,9 +66,12 @@ export default function Dashboard() {
 
   const bootstrap = useMutation(api.orchestrator.bootstrapProject);
   const sendMessage = useMutation(api.chat.sendMessage);
+  const applyAgentPatch = useMutation(api.chat.applyAgentPatch);
+  const runBuild = useMutation(api.runs.runBuildSimulation);
 
   const [isBootstrapping, setIsBootstrapping] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isRebuilding, setIsRebuilding] = useState(false);
 
   const handleSignOut = async () => {
     await signOut();
@@ -102,20 +110,76 @@ export default function Dashboard() {
   };
 
   const handleSendMessage = async (content: string) => {
-    if (!selectedProjectId) return;
+    if (!selectedProjectId || !selectedProject) return;
     setIsSending(true);
     try {
       await sendMessage({
         projectId: selectedProjectId as never,
         content,
       });
+
+      const contextFiles =
+        files?.map((f) => ({
+          path: f.path,
+          content: f.content.slice(0, 2000),
+        })) ?? [];
+
+      const prompt = buildAgentPrompt(selectedProject, contextFiles, content);
+      let agentResult: AgentResult;
+
+      try {
+        agentResult = await callOllama(prompt);
+      } catch (ollamaErr) {
+        agentResult = deterministicFallback(
+          selectedProject.rtos,
+          content,
+          ollamaErr instanceof Error ? ollamaErr.message : String(ollamaErr),
+        );
+      }
+
+      const patchResult = await applyAgentPatch({
+        projectId: selectedProjectId as never,
+        assistantMessage: agentResult.message,
+        files: agentResult.files,
+        requestBuild: agentResult.requestBuild,
+      });
+
+      if (patchResult.applied > 0) {
+        toast.success("Patch applied", {
+          description: `${patchResult.applied} file(s) modified.`,
+        });
+      }
+      if (patchResult.rejected > 0) {
+        toast.warning("Safety gate", {
+          description: `${patchResult.rejected} file path(s) rejected.`,
+        });
+      }
     } catch (err) {
-      toast.error("Message failed", {
+      toast.error("Agent failed", {
         description:
           err instanceof Error ? err.message : "Unknown error. Try again.",
       });
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleRebuild = async () => {
+    if (!selectedProjectId) return;
+    setIsRebuilding(true);
+    try {
+      const result = await runBuild({
+        projectId: selectedProjectId as never,
+      });
+      toast.success("Build finished", {
+        description: result.status === "success" ? "Build passed" : "Build failed",
+      });
+    } catch (err) {
+      toast.error("Rebuild failed", {
+        description: err instanceof Error ? err.message : "Unknown error",
+      });
+    } finally {
+      setIsRebuilding(false);
     }
   };
 
@@ -213,10 +277,33 @@ export default function Dashboard() {
                     {selectedProject.status}
                   </p>
                 </div>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span>{files?.length ?? 0} files</span>
-                  <span>•</span>
-                  <span>{runs?.length ?? 0} runs</span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowSafety((s) => !s)}
+                    className={cn(
+                      "gap-1.5 rounded-full",
+                      showSafety && "bg-muted",
+                    )}
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Safety
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleRebuild}
+                    disabled={isRebuilding}
+                    className="gap-1.5 rounded-full"
+                  >
+                    {isRebuilding ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    )}
+                    Rebuild
+                  </Button>
                 </div>
               </div>
               <div className="flex flex-1 overflow-hidden">
@@ -266,6 +353,20 @@ export default function Dashboard() {
                     />
                   </div>
                 </div>
+                {showSafety && (
+                  <div className="w-72 shrink-0">
+                    <SafetyPanel
+                      files={
+                        files?.map((f) => ({
+                          path: f.path,
+                          content: f.content,
+                          type: f.type,
+                        })) ?? []
+                      }
+                      rtos={selectedProject.rtos}
+                    />
+                  </div>
+                )}
               </div>
             </>
           ) : (
@@ -298,4 +399,156 @@ export default function Dashboard() {
       />
     </div>
   );
+}
+
+interface AgentResult {
+  message: string;
+  files: { path: string; content: string }[];
+  requestBuild: boolean;
+}
+
+function buildAgentPrompt(
+  project: { rtos: string; name: string; board?: string | null; mcu?: string | null },
+  files: { path: string; content: string }[],
+  userRequest: string,
+): string {
+  const fileContext = files
+    .map((f) => `--- ${f.path} ---\n${f.content}`)
+    .join("\n\n");
+
+  return `You are an expert embedded firmware engineer. The project uses ${project.rtos} and is named "${project.name}". Board: ${project.board ?? "unspecified"}, MCU: ${project.mcu ?? "unspecified"}.
+
+Current files:
+${fileContext || "(no files yet)"}
+
+User request:
+${userRequest}
+
+Respond with a single JSON object (no markdown, no backticks) in this exact shape:
+{
+  "message": "Concise explanation of what you changed and why.",
+  "files": [
+    {"path": "src/<name>.c", "content": "full file content"}
+  ],
+  "requestBuild": true
+}
+
+Rules:
+- Do not use absolute paths or paths with "..".
+- Only create files under src/, include/, tests/, drivers/, app/, or root CMakeLists.txt / README.md / prj.conf / .gitignore.
+- Use static allocation where possible. Avoid malloc/free in deterministic paths.
+- Keep ISRs short and use FromISR APIs where relevant.
+- requestBuild should be true unless the request is purely a question.
+`;
+}
+
+async function callOllama(prompt: string): Promise<AgentResult> {
+  const response = await fetch("http://localhost:11434/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "llama3",
+      prompt,
+      stream: false,
+      format: "json",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Ollama returned ${response.status}`);
+  }
+
+  const data = (await response.json()) as { response?: string };
+  const text = data.response ?? "";
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("No JSON object found in Ollama response");
+  }
+
+  const parsed = JSON.parse(jsonMatch[0]) as {
+    message?: string;
+    files?: { path: string; content: string }[];
+    requestBuild?: boolean;
+  };
+
+  return {
+    message:
+      parsed.message ?? "No explanation provided.",
+    files:
+      parsed.files?.filter(
+        (f) => typeof f.path === "string" && typeof f.content === "string",
+      ) ?? [],
+    requestBuild: Boolean(parsed.requestBuild),
+  };
+}
+
+function deterministicFallback(
+  rtos: string,
+  userRequest: string,
+  error: string,
+): AgentResult {
+  const lower = userRequest.toLowerCase();
+  let extraFiles: { path: string; content: string }[] = [];
+
+  if (lower.includes("led")) {
+    extraFiles.push({
+      path: "src/led.c",
+      content:
+        rtos === "zephyr"
+          ? `#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+
+/* Stub LED driver generated by fallback agent. */`
+          : `#include "FreeRTOS.h"
+#include "task.h"
+
+/* Stub LED driver generated by fallback agent. */`,
+    });
+  }
+  if (lower.includes("sensor") || lower.includes("temperature")) {
+    extraFiles.push({
+      path: "src/sensor.c",
+      content:
+        rtos === "zephyr"
+          ? `#include <zephyr/kernel.h>
+#include <zephyr/drivers/sensor.h>
+
+/* Stub sensor driver generated by fallback agent. */`
+          : `#include "FreeRTOS.h"
+#include "task.h"
+
+/* Stub sensor driver generated by fallback agent. */`,
+    });
+  }
+
+  if (extraFiles.length === 0) {
+    extraFiles.push({
+      path: "src/app.c",
+      content:
+        rtos === "zephyr"
+          ? `#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+
+void app_init(void)
+{
+    printk("Application initialized.\\n");
+}
+`
+          : `#include "FreeRTOS.h"
+#include "task.h"
+#include <stdio.h>
+
+void app_init(void)
+{
+    printf("Application initialized.\\n");
+}
+`,
+    });
+  }
+
+  return {
+    message: `Ollama not available (${error}). Applied a deterministic fallback patch. The file(s) are stubs; refine them with a more specific request once Ollama is running.`,
+    files: extraFiles,
+    requestBuild: true,
+  };
 }

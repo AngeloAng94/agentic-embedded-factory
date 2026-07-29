@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { runBuildSimulationImpl } from "./buildSimulation";
 
 export const insert = mutation({
   args: {
@@ -33,5 +34,14 @@ export const list = query({
       .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
       .order("desc")
       .take(50);
+  },
+});
+
+export const runBuildSimulation = mutation({
+  args: {
+    projectId: v.id("projects"),
+  },
+  handler: async (ctx, args) => {
+    return await runBuildSimulationImpl(ctx, args.projectId);
   },
 });
