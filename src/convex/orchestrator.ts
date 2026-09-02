@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation } from "./_generated/server";
+import { getAuthUserId } from "@convex-dev/auth/server";
 import { runBuildSimulationImpl } from "./buildSimulation";
 import { makeSkeleton, inferFileType } from "./templates";
 
@@ -10,7 +11,7 @@ export const bootstrapProject = mutation({
     rtos: v.optional(v.union(v.literal("freertos"), v.literal("zephyr"))),
   },
   handler: async (ctx, args) => {
-    const userId = await ctx.auth.getUserIdentity().then((id) => id?._id);
+    const userId = await getAuthUserId(ctx);
     if (!userId) {
       throw new Error("Unauthenticated");
     }
