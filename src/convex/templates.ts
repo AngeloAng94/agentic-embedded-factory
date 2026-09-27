@@ -7,7 +7,7 @@ export interface GeneratedFile {
 }
 
 const zephyrCMake = (name: string) => `cmake_minimum_required(VERSION 3.20.0)
-find_package(Zephyr REQUIRED HINTS \$ENV{ZEPHYR_BASE})
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(${name})
 
 target_sources(app PRIVATE src/main.c)
@@ -152,7 +152,7 @@ Embedded firmware project generated with EmbedFactory.
 
 ## Build
 
-${rtos === "zephyr" ? "\`\`\`bash\nwest build -b <board> -p always\n\`\`\`" : "\`\`\`bash\ncmake -S . -B build && cmake --build build\n\`\`\`"}
+${rtos === "zephyr" ? "```bash\nwest build -b <board> -p always\n```" : "```bash\ncmake -S . -B build && cmake --build build\n```"}
 
 A build only counts as verified when a real toolchain exits 0; the EmbedFactory
 workspace reports REAL / SIMULATED / NOT AVAILABLE explicitly.

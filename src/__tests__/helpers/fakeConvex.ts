@@ -137,6 +137,8 @@ export class FakeDb {
   }
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any -- the fake context
+   deliberately accepts the real handler signatures, which are generic. */
 export type Handler = (ctx: any, args: any) => Promise<any>;
 
 export function handlerOf(fn: unknown): Handler {

@@ -53,6 +53,8 @@ export function isSafeRelativePath(path: string): boolean {
   if (path.includes("..") || path.includes("~")) return false;
   if (path.includes("//") || path.includes("\\\\")) return false;
   if (/^[a-zA-Z]:/.test(path)) return false; // windows drive letters
+  // Control characters are rejected on purpose: they can hide path traversal.
+  // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f]/.test(path)) return false;
   return true;
 }

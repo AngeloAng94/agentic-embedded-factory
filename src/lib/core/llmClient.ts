@@ -120,6 +120,18 @@ export function resolveLlmConfig(
   };
 }
 
+function extractOllamaText(payload: Record<string, unknown>): string {
+  return typeof payload.response === "string" ? payload.response : "";
+}
+
+function extractOpenAiText(payload: Record<string, unknown>): string {
+  const choices = payload.choices;
+  if (!Array.isArray(choices) || choices.length === 0) return "";
+  const first = choices[0] as Record<string, unknown> | undefined;
+  const message = first?.message as Record<string, unknown> | undefined;
+  return typeof message?.content === "string" ? message.content : "";
+}
+
 function isRetryable(code: LlmErrorCode, status?: number): boolean {
   if (code === "LLM_UNREACHABLE" || code === "LLM_TIMEOUT") return true;
   if (code === "LLM_HTTP_ERROR" && status !== undefined && status >= 500) return true;
@@ -198,11 +210,12 @@ export async function callLlm(
         return { ok: false, code: lastCode, message: lastMessage, attempts: attempt, endpoint };
       }
 
-      const payload = (await response.json()) as Record<string, any>;
+      const payload = (await response.json().catch(() => null)) as unknown;
+      const record = (payload ?? {}) as Record<string, unknown>;
       const text =
         config.provider === "ollama"
-          ? String(payload?.response ?? "")
-          : String(payload?.choices?.[0]?.message?.content ?? "");
+          ? extractOllamaText(record)
+          : extractOpenAiText(record);
 
       if (text.trim() === "") {
         lastCode = "LLM_EMPTY_RESPONSE";
