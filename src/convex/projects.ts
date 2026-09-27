@@ -1,87 +1,38 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
+import { requireOwnedProject, requireUserId } from "./lib/auth";
 import { projectStatusValidator } from "./schema";
-import type { Id } from "./_generated/dataModel";
 
-export const insertProject = mutation({
-  args: {
-    userId: v.id("users"),
-    name: v.string(),
-    rtos: v.union(v.literal("freertos"), v.literal("zephyr")),
-    status: projectStatusValidator,
-    description: v.optional(v.string()),
-    board: v.optional(v.string()),
-    mcu: v.optional(v.string()),
-    toolchain: v.optional(v.string()),
-    peripherals: v.optional(v.array(v.string())),
-    memoryBudget: v.optional(v.string()),
-    flashBudget: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    return await ctx.db.insert("projects", args);
-  },
-});
-
-export const insertFile = mutation({
-  args: {
-    projectId: v.id("projects"),
-    path: v.string(),
-    content: v.string(),
-    type: v.string(),
-  },
-  handler: async (ctx, args) => {
-    return await ctx.db.insert("projectFiles", {
-      projectId: args.projectId,
-      path: args.path,
-      content: args.content,
-      type: args.type as
-        | "c"
-        | "h"
-        | "cpp"
-        | "cmake"
-        | "conf"
-        | "overlay"
-        | "yaml"
-        | "json"
-        | "md"
-        | "other",
-      version: 1,
-      status: "current",
-    });
-  },
-});
-
-export const updateStatus = mutation({
-  args: {
-    projectId: v.id("projects"),
-    status: projectStatusValidator,
-  },
-  handler: async (ctx, args) => {
-    await ctx.db.patch(args.projectId, { status: args.status });
-  },
-});
+/**
+ * Project queries — every handler derives the user from the session and
+ * enforces ownership. No client-supplied `userId` is accepted anywhere.
+ */
 
 export const list = query({
-  args: { userId: v.id("users") },
-  handler: async (ctx, args) => {
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUserId(ctx);
     return await ctx.db
       .query("projects")
-      .withIndex("userId", (q) => q.eq("userId", args.userId))
+      .withIndex("userId", (q) => q.eq("userId", userId))
       .order("desc")
-      .take(50);
+      .take(100);
   },
 });
 
 export const get = query({
   args: { projectId: v.id("projects") },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.projectId);
+    const userId = await requireUserId(ctx);
+    return await requireOwnedProject(ctx, args.projectId, userId);
   },
 });
 
 export const listFiles = query({
   args: { projectId: v.id("projects") },
   handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    await requireOwnedProject(ctx, args.projectId, userId);
     return await ctx.db
       .query("projectFiles")
       .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
@@ -92,6 +43,8 @@ export const listFiles = query({
 export const getFile = query({
   args: { projectId: v.id("projects"), path: v.string() },
   handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    await requireOwnedProject(ctx, args.projectId, userId);
     const files = await ctx.db
       .query("projectFiles")
       .withIndex("by_project", (q) =>
@@ -99,5 +52,57 @@ export const getFile = query({
       )
       .take(1);
     return files[0] ?? null;
+  },
+});
+
+export const remove = mutation({
+  args: { projectId: v.id("projects") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    await requireOwnedProject(ctx, args.projectId, userId);
+
+    const files = await ctx.db
+      .query("projectFiles")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .collect();
+    for (const row of files) await ctx.db.delete(row._id);
+
+    const versions = await ctx.db
+      .query("fileVersions")
+      .withIndex("by_project_created", (q) => q.eq("projectId", args.projectId))
+      .collect();
+    for (const row of versions) await ctx.db.delete(row._id);
+
+    const messages = await ctx.db
+      .query("messages")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .collect();
+    for (const row of messages) await ctx.db.delete(row._id);
+
+    const runs = await ctx.db
+      .query("runs")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .collect();
+    for (const row of runs) await ctx.db.delete(row._id);
+
+    await ctx.db.delete(args.projectId);
+    return { deleted: true };
+  },
+});
+
+/** Internal: status changes are always derived from a real event server-side. */
+export const setStatus = internalMutation({
+  args: {
+    projectId: v.id("projects"),
+    status: projectStatusValidator,
+  },
+  handler: async (ctx, args) => {
+    const project = await ctx.db.get(args.projectId);
+    if (!project) return null;
+    // Never allow a project to become `ready`: only `verified` (real build ok)
+    // or `unverified` may be written by the system.
+    const status = args.status === "ready" ? "unverified" : args.status;
+    await ctx.db.patch(args.projectId, { status });
+    return status;
   },
 });

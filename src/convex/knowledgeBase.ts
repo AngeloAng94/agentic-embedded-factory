@@ -1,5 +1,6 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalQuery, mutation, query } from "./_generated/server";
+import { requireUserId } from "./lib/auth";
 
 const knowledgeSeed = [
   {
@@ -16,7 +17,7 @@ A minimal Zephyr application has the following layout:
 
 Build with: west build -b <board> -p auto
     `.trim(),
-    tags: ["zephyr", "west", "build"],
+    tags: ["zephyr", "west", "build", "layout"],
   },
   {
     rtos: "zephyr" as const,
@@ -34,20 +35,59 @@ int main(void) {
     return 0;
 }
     `.trim(),
-    tags: ["zephyr", "template"],
+    tags: ["zephyr", "template", "main", "thread"],
   },
   {
     rtos: "zephyr" as const,
     category: "checklist",
     title: "Zephyr RTOS Checklist",
     content: `
-- prj.conf enables CONFIG_* needed by the application.
+- prj.conf enables the CONFIG_* options needed by the application.
 - Device tree overlay matches the board pinmux/aliases.
 - CMakeLists.txt finds Zephyr via find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE}).
-- main.c uses kernel.h and does not block critical ISR latency.
+- Thread stacks are defined statically with K_THREAD_STACK_DEFINE or K_THREAD_DEFINE.
+- ISRs stay short and never call blocking kernel APIs; use k_work_submit instead.
 - Stack sizes are verified with CONFIG_MAIN_STACK_SIZE.
     `.trim(),
-    tags: ["zephyr", "checklist"],
+    tags: ["zephyr", "checklist", "isr", "stack"],
+  },
+  {
+    rtos: "zephyr" as const,
+    category: "pattern",
+    title: "Zephyr GPIO interrupt pattern",
+    content: `
+static struct gpio_callback button_cb;
+static struct k_work button_work;
+
+static void button_work_handler(struct k_work *work) {
+    /* deferred, may block */
+}
+
+static void button_isr(const struct device *port,
+                       struct gpio_callback *cb, uint32_t pins) {
+    ARG_UNUSED(port); ARG_UNUSED(cb); ARG_UNUSED(pins);
+    k_work_submit(&button_work); /* ISR-safe, no blocking */
+}
+    `.trim(),
+    tags: ["zephyr", "gpio", "isr", "workqueue"],
+  },
+  {
+    rtos: "zephyr" as const,
+    category: "pattern",
+    title: "Zephyr sensor polling pattern",
+    content: `
+const struct device *dev = DEVICE_DT_GET(DT_ALIAS(temp0));
+struct sensor_value value;
+
+if (!device_is_ready(dev)) {
+    printk("sensor not ready\\n");
+    return;
+}
+if (sensor_sample_fetch(dev) == 0) {
+    sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &value);
+}
+    `.trim(),
+    tags: ["zephyr", "sensor", "temperature", "devicetree"],
   },
   {
     rtos: "freertos" as const,
@@ -62,7 +102,7 @@ A vendor-agnostic FreeRTOS project typically contains:
 - src/drivers/: HAL wrappers and low-level drivers.
 - tests/: unit tests with mocked kernel APIs.
     `.trim(),
-    tags: ["freertos", "build"],
+    tags: ["freertos", "build", "layout"],
   },
   {
     rtos: "freertos" as const,
@@ -93,7 +133,23 @@ void appTaskCreate(void) {
         TASK_PRIORITY, stackBuffer, &taskBuffer);
 }
     `.trim(),
-    tags: ["freertos", "static", "task"],
+    tags: ["freertos", "static", "task", "pattern"],
+  },
+  {
+    rtos: "freertos" as const,
+    category: "pattern",
+    title: "FreeRTOS ISR to task hand-off",
+    content: `
+static QueueHandle_t isrQueue;
+static BaseType_t higherPriorityTaskWoken;
+
+void EXTI0_IRQHandler(void) {
+    uint32_t event = 1;
+    xQueueSendToBackFromISR(isrQueue, &event, &higherPriorityTaskWoken);
+    portYIELD_FROM_ISR(higherPriorityTaskWoken);
+}
+    `.trim(),
+    tags: ["freertos", "isr", "queue", "fromisr"],
   },
   {
     rtos: "freertos" as const,
@@ -107,7 +163,7 @@ void appTaskCreate(void) {
 - Stack overflow checking enabled during development.
 - No dynamic memory in deterministic paths.
     `.trim(),
-    tags: ["freertos", "checklist"],
+    tags: ["freertos", "checklist", "isr", "stack", "config"],
   },
   {
     rtos: "general" as const,
@@ -116,24 +172,33 @@ void appTaskCreate(void) {
     content: `
 - Prefer static allocation; avoid malloc/free in real-time paths.
 - Keep ISRs short; defer work to tasks via notifications or queues.
-- Use mutexes/semapphores with timeout, never block forever.
+- Use mutexes/semaphores with timeout, never block forever.
 - Validate pointer arguments and array bounds.
 - Enable watchdog and stack overflow checks.
 - Never call non-reentrant libc functions from ISRs.
+- Use bounded string APIs (strncpy/snprintf) instead of strcpy/sprintf.
     `.trim(),
-    tags: ["safety", "general"],
+    tags: ["safety", "general", "allocation", "isr"],
+  },
+  {
+    rtos: "general" as const,
+    category: "workflow",
+    title: "Build verification policy",
+    content: `
+- A build counts as verified ONLY when a real toolchain was executed and exited 0.
+- "SIMULATED" and "NOT_AVAILABLE" results never verify a project.
+- Capture the exact command, exit code, duration, stdout and stderr for every build.
+- On failure, feed the compiler output back to the model and rebuild (max 3 attempts).
+    `.trim(),
+    tags: ["build", "verification", "policy", "workflow"],
   },
 ];
 
 export const seedKnowledgeBase = mutation({
   args: {},
   handler: async (ctx) => {
-    const existing = await ctx.db
-      .query("knowledgeBase")
-      .withIndex("by_rtos_category", (q) =>
-        q.eq("rtos", "zephyr").eq("category", "structure"),
-      )
-      .take(1);
+    await requireUserId(ctx);
+    const existing = await ctx.db.query("knowledgeBase").take(1);
     if (existing.length > 0) {
       return { inserted: 0, reason: "already seeded" };
     }
@@ -145,8 +210,11 @@ export const seedKnowledgeBase = mutation({
 });
 
 export const listByRtos = query({
-  args: { rtos: v.union(v.literal("freertos"), v.literal("zephyr"), v.literal("general")) },
+  args: {
+    rtos: v.union(v.literal("freertos"), v.literal("zephyr"), v.literal("general")),
+  },
   handler: async (ctx, args) => {
+    await requireUserId(ctx);
     return await ctx.db
       .query("knowledgeBase")
       .withIndex("by_rtos_category", (q) => q.eq("rtos", args.rtos))
@@ -160,11 +228,28 @@ export const listByCategory = query({
     category: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireUserId(ctx);
     return await ctx.db
       .query("knowledgeBase")
       .withIndex("by_rtos_category", (q) =>
         q.eq("rtos", args.rtos).eq("category", args.category),
       )
       .collect();
+  },
+});
+
+/** Internal: the documents available for retrieval by the agent. */
+export const allDocuments = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const docs = await ctx.db.query("knowledgeBase").take(200);
+    return docs.map((doc) => ({
+      _id: doc._id as unknown as string,
+      rtos: doc.rtos,
+      category: doc.category,
+      title: doc.title,
+      content: doc.content,
+      tags: doc.tags ?? [],
+    }));
   },
 });

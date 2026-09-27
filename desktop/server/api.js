@@ -1,21 +1,99 @@
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const db = require("./db");
 const { makeSkeleton } = require("./templates");
+const { runRunner } = require("./runner-bridge");
 
 const router = express.Router();
 
+const MAX_REPAIR_ATTEMPTS = 3;
+
+function isSafeRelativePath(filePath) {
+  if (!filePath || typeof filePath !== "string") return false;
+  if (filePath.startsWith("/") || filePath.startsWith("\\")) return false;
+  if (filePath.includes("..") || filePath.includes("~")) return false;
+  return true;
+}
+
+function writeTempJson(value) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "embedfactory-kb-"));
+  const file = path.join(dir, "knowledge.json");
+  fs.writeFileSync(file, JSON.stringify(value), "utf8");
+  return { file, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+function projectFilesPayload(projectId) {
+  return db.listFiles(projectId).map((file) => ({ path: file.path, content: file.content }));
+}
+
+function buildEvidence(build, type = "build", extra = {}) {
+  if (!build) {
+    return {
+      type,
+      verification: "NOT_AVAILABLE",
+      verdict: "UNKNOWN",
+      command: null,
+      exitCode: null,
+      durationMs: null,
+      stdout: "",
+      stderr: "",
+      artifacts: [],
+      reason: "no build result was produced",
+      ...extra,
+    };
+  }
+  return {
+    type,
+    verification: build.verification,
+    verdict: build.verdict,
+    command: build.command || null,
+    toolchain: build.toolchain || null,
+    exitCode: typeof build.exitCode === "number" ? build.exitCode : null,
+    durationMs: typeof build.durationMs === "number" ? build.durationMs : null,
+    stdout: String(build.stdout || "").slice(0, 40000),
+    stderr: String(build.stderr || "").slice(0, 40000),
+    artifacts: build.artifacts || [],
+    reason: build.reason || null,
+    attempt: build.attempt || 1,
+    ...extra,
+  };
+}
+
+function formatBuildReport(build) {
+  if (!build) return "No build result was produced.";
+  return [
+    "BUILD",
+    "─────",
+    `Command: ${build.command || "(none)"}`,
+    `Exit code: ${build.exitCode === null || build.exitCode === undefined ? "n/a" : build.exitCode}`,
+    `Duration: ${build.durationMs ? `${(build.durationMs / 1000).toFixed(1)}s` : "n/a"}`,
+    "",
+    "stdout:",
+    (build.stdout || "").trim() || "(empty)",
+    "",
+    "stderr:",
+    (build.stderr || "").trim() || "(empty)",
+    "",
+    build.artifacts && build.artifacts.length > 0 ? `Artifacts: ${build.artifacts.join(", ")}` : "",
+    build.reason ? `Reason: ${build.reason}` : "",
+    `Status: ${build.verification} · ${build.verdict}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 // ─── Auth ─────────────────────────────────────────────────
 router.get("/auth/user", (req, res) => {
-  const user = db.getDefaultUser();
-  res.json(user);
+  res.json(db.getDefaultUser());
 });
 
 // ─── Projects ─────────────────────────────────────────────
 router.get("/projects", (req, res) => {
   const user = db.getDefaultUser();
-  const projects = db.listProjects(user.id);
-  res.json(projects);
+  res.json(db.listProjects(user.id));
 });
 
 router.get("/projects/:id", (req, res) => {
@@ -27,19 +105,13 @@ router.get("/projects/:id", (req, res) => {
 router.post("/projects/bootstrap", (req, res) => {
   try {
     const user = db.getDefaultUser();
-    const { userPrompt, rtos } = req.body;
+    const { userPrompt, rtos, projectName } = req.body || {};
+    if (!userPrompt) return res.status(400).json({ error: "userPrompt is required" });
 
-    if (!userPrompt) {
-      return res.status(400).json({ error: "userPrompt is required" });
-    }
-
+    const lower = userPrompt.toLowerCase();
     const detectedRtos =
       rtos ||
-      (userPrompt.toLowerCase().includes("zephyr")
-        ? "zephyr"
-        : userPrompt.toLowerCase().includes("freertos")
-          ? "freertos"
-          : null);
+      (lower.includes("zephyr") ? "zephyr" : lower.includes("freertos") ? "freertos" : null);
 
     if (!detectedRtos) {
       return res.status(400).json({
@@ -49,58 +121,56 @@ router.post("/projects/bootstrap", (req, res) => {
     }
 
     const name =
+      projectName ||
       userPrompt
         .split(/\s+/)
-        .find((w) => w.length > 3 && /[A-Za-z]/.test(w))
+        .find((word) => word.length > 3 && /[a-zA-Z]/.test(word))
         ?.replace(/[^a-zA-Z0-9_-]/g, "")
-        .slice(0, 32) || `${detectedRtos}_project`;
+        .slice(0, 32) ||
+      `${detectedRtos}_project`;
 
     const boardMatch = userPrompt.match(/board[\s:=]+([A-Za-z0-9_/-]+)/i);
     const mcuMatch = userPrompt.match(/mcu[\s:=]+([A-Za-z0-9_/-]+)/i);
 
+    // The project starts as unverified: no compiler has been invoked.
     const project = db.createProject(
       user.id,
       name,
       detectedRtos,
-      "generating",
+      "unverified",
       userPrompt,
-      boardMatch?.[1],
-      mcuMatch?.[1]
+      boardMatch ? boardMatch[1].toLowerCase() : undefined,
+      mcuMatch ? mcuMatch[1] : undefined,
     );
 
-    // Generate skeleton files
-    const files = makeSkeleton(detectedRtos, name);
-    for (const file of files) {
-      db.insertFile(project.id, file.path, file.content, file.type);
+    for (const file of makeSkeleton(detectedRtos, name)) {
+      db.updateFileVersioned(project.id, file.path, file.content, {
+        author: "bootstrap",
+        reason: "initial project skeleton",
+      });
     }
 
-    // Run simulated build
-    db.updateProjectStatus(project.id, "building");
-    const buildResult = runBuildSimulation(project);
-
-    // Add assistant message
     db.insertMessage(
       project.id,
       "assistant",
-      `## Report: ${name}\n\n- **RTOS:** ${detectedRtos}\n- **Build:** ${buildResult.status}\n- **Test:** ${buildResult.status === "success" ? "passed" : "failed"}\n\nProject generated with RTOS-specific skeleton. You can now request incremental changes via chat.`
+      `## Project created: ${name}\n\n- **RTOS:** ${detectedRtos}\n- **Build:** NOT RUN — no compiler was invoked, so nothing is verified yet.\n- **Status:** unverified\n\nDescribe the firmware behaviour you need: each request becomes validated patches and is built with a real toolchain (up to ${MAX_REPAIR_ATTEMPTS} automatic repair attempts).`,
     );
 
-    res.json({
-      projectId: project.id,
-      rtos: detectedRtos,
-      name,
-      build: buildResult,
-    });
-  } catch (err) {
-    console.error("Bootstrap error:", err);
-    res.status(500).json({ error: err.message });
+    res.json({ projectId: project.id, rtos: detectedRtos, name, build: null });
+  } catch (error) {
+    console.error("Bootstrap error:", error);
+    res.status(500).json({ error: error.message });
   }
+});
+
+router.delete("/projects/:id", (req, res) => {
+  db.getDb().prepare("DELETE FROM projects WHERE id = ?").run(req.params.id);
+  res.json({ deleted: true });
 });
 
 // ─── Files ────────────────────────────────────────────────
 router.get("/projects/:id/files", (req, res) => {
-  const files = db.listFiles(req.params.id);
-  res.json(files);
+  res.json(db.listFiles(req.params.id));
 });
 
 router.get("/projects/:id/files/:path(*)", (req, res) => {
@@ -111,137 +181,292 @@ router.get("/projects/:id/files/:path(*)", (req, res) => {
 
 // ─── Messages ─────────────────────────────────────────────
 router.get("/projects/:id/messages", (req, res) => {
-  const messages = db.listMessages(req.params.id);
-  res.json(messages);
+  res.json(db.listMessages(req.params.id));
 });
 
 router.post("/projects/:id/messages", (req, res) => {
-  const { content } = req.body;
+  const { content } = req.body || {};
   if (!content) return res.status(400).json({ error: "content is required" });
-  const msg = db.insertMessage(req.params.id, "user", content);
-  res.json(msg);
+  res.json(db.insertMessage(req.params.id, "user", content));
 });
 
-// ─── Agent Patch ──────────────────────────────────────────
-const ALLOWED_ROOT_FILES = new Set([
-  "CMakeLists.txt", "README.md", "prj.conf", "Kconfig", "west.yml", ".gitignore",
-]);
-const ALLOWED_DIRS = new Set(["src", "include", "boards", "tests", "drivers", "app"]);
-const ALLOWED_EXT = new Set([
-  ".c", ".h", ".cpp", ".cmake", ".conf", ".overlay", ".yaml", ".yml", ".json", ".md", ".txt", ".ld", ".S",
-]);
+// ─── Agent turn (server side, real LLM, validated patches, real build) ────
+router.post("/projects/:id/agent", async (req, res) => {
+  const project = db.getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: "Not found" });
 
-function isPathAllowed(filePath) {
-  if (!filePath || typeof filePath !== "string") return false;
-  if (filePath.startsWith("/") || filePath.startsWith("\\")) return false;
-  if (filePath.includes("..") || filePath.includes("~")) return false;
-  const parts = filePath.split("/");
-  const fileName = parts[parts.length - 1];
-  if (parts.length === 1) return ALLOWED_ROOT_FILES.has(fileName);
-  if (!ALLOWED_DIRS.has(parts[0])) return false;
-  const dot = fileName.lastIndexOf(".");
-  if (dot <= 0) return false;
-  return ALLOWED_EXT.has(fileName.slice(dot).toLowerCase());
-}
+  const { userMessage, maxRepairAttempts } = req.body || {};
+  if (!userMessage) return res.status(400).json({ error: "userMessage is required" });
 
-router.post("/projects/:id/patch", (req, res) => {
-  const { assistantMessage, files, requestBuild } = req.body;
-  const projectId = req.params.id;
+  const maxAttempts = Math.min(Math.max(Number(maxRepairAttempts) || MAX_REPAIR_ATTEMPTS, 1), 4);
+  db.insertMessage(project.id, "user", userMessage);
 
-  let applied = 0;
-  let rejected = 0;
+  const knowledge = db.listKnowledgeDocuments();
+  const kb = writeTempJson(knowledge);
 
-  for (const file of files || []) {
-    if (isPathAllowed(file.path)) {
-      db.updateFile(projectId, file.path, file.content);
-      applied++;
-    } else {
-      rejected++;
+  let files = projectFilesPayload(project.id);
+  let lastBuild = null;
+
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const run = await runRunner(
+        [
+          "turn",
+          "--files",
+          "",
+          "--request",
+          userMessage,
+          "--name",
+          project.name,
+          "--rtos",
+          project.rtos,
+          "--board",
+          project.board || "",
+          "--knowledge",
+          kb.file,
+          "--build",
+          "--json",
+        ],
+        files,
+      );
+
+      const payload = run.payload;
+      if (!payload) {
+        const message = `**Agent unavailable — no files were changed.**\n\n${
+          run.stderr || run.message || "the local runner produced no result"
+        }`;
+        db.insertMessage(project.id, "assistant", message);
+        return res.status(200).json({ ok: false, code: "RUNNER_NOT_AVAILABLE", message });
+      }
+
+      if (payload.knowledgeLog) {
+        db.insertRun(project.id, {
+          type: "retrieval",
+          verification: "REAL",
+          verdict: "SUCCESS",
+          stdout: String(payload.knowledgeLog),
+          reason: "knowledge base retrieval evidence",
+          summary: "retrieval",
+        });
+      }
+
+      if (payload.ok === false) {
+        const message = `**${payload.code}: nothing was written.**\n\n${payload.message}`;
+        db.insertMessage(project.id, "assistant", message);
+        return res.status(200).json({ ok: false, code: payload.code, message: payload.message });
+      }
+
+      for (const write of payload.writes || []) {
+        if (!isSafeRelativePath(write.path)) continue;
+        db.updateFileVersioned(project.id, write.path, write.content, {
+          author: "agent",
+          reason: payload.summary || "agent change",
+          patch: write.patch || null,
+        });
+      }
+
+      if (payload.safety) {
+        db.insertRun(project.id, {
+          type: "safety",
+          verification: "REAL",
+          verdict: payload.safety.summary.fail > 0 ? "FAILURE" : "SUCCESS",
+          stdout: [
+            `engine: ${payload.safety.engine} (${payload.safety.rtos})`,
+            `summary: ${payload.safety.summary.pass} PASS / ${payload.safety.summary.warning} WARNING / ${payload.safety.summary.fail} FAIL`,
+            ...payload.safety.findings.map(
+              (finding) =>
+                `[${finding.status}] ${finding.rule} (${finding.severity}) ${finding.file}${
+                  finding.line === null ? "" : `:${finding.line}`
+                } — ${finding.explanation}`,
+            ),
+          ].join("\n"),
+          summary: `${payload.safety.summary.pass} PASS / ${payload.safety.summary.warning} WARNING / ${payload.safety.summary.fail} FAIL`,
+          reason: "static analysis of the current sources",
+        });
+      }
+
+      const writes = (payload.writes || []).length;
+      const summary =
+        writes > 0
+          ? `${writes} file(s) written (${(payload.writes || [])
+              .map((write) => `${write.path} ${write.kind}`)
+              .join(", ")})`
+          : "no file change";
+
+      if (!payload.requestBuild) {
+        db.insertMessage(project.id, "assistant", `${payload.summary}\n\n_${summary}. No build requested._`);
+        return res.status(200).json({ ok: true, status: payload.status, writes });
+      }
+
+      lastBuild = payload.build || null;
+      if (!lastBuild) {
+        db.insertMessage(
+          project.id,
+          "assistant",
+          `**Build NOT AVAILABLE — nothing was verified.**\n\nNo build result was produced by the runner.\n${summary}`,
+        );
+        return res.status(200).json({ ok: true, status: "BUILD_NOT_AVAILABLE", writes });
+      }
+
+      const runRow = db.insertRun(
+        project.id,
+        buildEvidence(lastBuild, "build", { patchSummary: summary, attempt }),
+      );
+
+      if (lastBuild.verdict === "SUCCESS" && lastBuild.verification === "REAL") {
+        const message = `## BUILD SUCCESS (real toolchain)\n\n${formatBuildReport(lastBuild)}\n\n### Change\n\n${payload.summary}\n\n${summary}`;
+        db.insertMessage(project.id, "assistant", message);
+        return res.status(200).json({
+          ok: true,
+          status: "SUCCESS",
+          attempts: attempt,
+          build: lastBuild,
+          runId: runRow.id,
+        });
+      }
+
+      if (attempt >= maxAttempts) break;
+      files = projectFilesPayload(project.id);
     }
+
+    const message = `## BUILD FAILED — REPAIR LIMIT REACHED\n\n${formatBuildReport(lastBuild)}\n\nAttempts used: ${maxAttempts}/${maxAttempts}.`;
+    db.insertMessage(project.id, "assistant", message);
+    return res.status(200).json({
+      ok: false,
+      code: "REPAIR_LIMIT_REACHED",
+      message,
+      attempts: maxAttempts,
+      build: lastBuild,
+    });
+  } finally {
+    kb.cleanup();
+  }
+});
+
+// ─── Build ────────────────────────────────────────────────
+router.post("/projects/:id/build", async (req, res) => {
+  const project = db.getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: "Not found" });
+
+  const run = await runRunner(
+    [
+      "build",
+      "--files",
+      "",
+      "--rtos",
+      project.rtos,
+      "--board",
+      project.board || "",
+      "--json",
+    ],
+    projectFilesPayload(project.id),
+  );
+
+  if (!run.payload) {
+    const evidence = buildEvidence(null, "build", {
+      reason: run.message || "the local runner produced no result",
+    });
+    db.insertRun(project.id, evidence);
+    db.insertMessage(project.id, "assistant", `**Build NOT AVAILABLE**\n\n${evidence.reason}`);
+    return res.status(200).json({ ok: false, code: "RUNNER_NOT_AVAILABLE", build: evidence });
   }
 
-  if (assistantMessage) {
-    const note = rejected > 0 ? `\n\n_Note: ${rejected} file path(s) rejected by safety gate._` : "";
-    db.insertMessage(projectId, "assistant", assistantMessage + note);
-  }
-
-  let buildResult = null;
-  if (requestBuild) {
-    const project = db.getProject(projectId);
-    if (project) {
-      db.updateProjectStatus(projectId, "building");
-      buildResult = runBuildSimulation(project);
-    }
-  }
-
-  res.json({ applied, rejected, buildStatus: buildResult?.status || null });
+  db.insertRun(project.id, buildEvidence(run.payload, "build"));
+  db.insertMessage(project.id, "assistant", formatBuildReport(run.payload));
+  res.json({ ok: true, build: run.payload });
 });
 
 // ─── Runs ─────────────────────────────────────────────────
 router.get("/projects/:id/runs", (req, res) => {
-  const runs = db.listRuns(req.params.id);
-  res.json(runs);
+  res.json(db.listRuns(req.params.id));
 });
 
-router.post("/projects/:id/build", (req, res) => {
+// ─── Versions / rollback ──────────────────────────────────
+router.get("/projects/:id/versions", (req, res) => {
+  res.json(db.listVersions(req.params.id));
+});
+
+router.post("/projects/:id/rollback", (req, res) => {
+  const { versionId } = req.body || {};
+  const version = versionId ? db.getVersion(versionId) : null;
+  if (!version || version.project_id !== req.params.id) {
+    return res.status(404).json({ error: "Version not found for this project" });
+  }
+  const updated = db.updateFileVersioned(req.params.id, version.path, version.content, {
+    author: "rollback",
+    reason: `restored v${version.version} (${version.author})`,
+  });
+  db.updateProjectStatus(req.params.id, "unverified");
+  res.json({ path: version.path, version: updated.version, restoredFrom: version.version });
+});
+
+// ─── Export to a real directory ───────────────────────────
+router.post("/projects/:id/export", async (req, res) => {
   const project = db.getProject(req.params.id);
   if (!project) return res.status(404).json({ error: "Not found" });
-  const result = runBuildSimulation(project);
-  res.json(result);
+
+  const outDir = req.body && req.body.outDir;
+  if (!outDir) {
+    return res.status(400).json({
+      ok: false,
+      message: "outDir is required: choose a local directory to write the project into",
+    });
+  }
+
+  const run = await runRunner([
+    "export",
+    "--files",
+    "",
+    "--out",
+    path.resolve(outDir),
+    "--name",
+    project.name,
+    "--rtos",
+    project.rtos,
+    "--board",
+    project.board || "",
+    "--json",
+  ], projectFilesPayload(project.id));
+  res.json(
+    run.payload || {
+      ok: false,
+      message: run.stderr || run.message || "export failed",
+    },
+  );
+});
+
+// ─── Git ──────────────────────────────────────────────────
+router.post("/projects/:id/git", async (req, res) => {
+  const project = db.getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: "Not found" });
+
+  const message =
+    (req.body && req.body.message) || `Initial commit from EmbedFactory (${project.name})`;
+  const run = await runRunner([
+    "git",
+    "--files",
+    "",
+    "--message",
+    message,
+    "--json",
+  ], projectFilesPayload(project.id));
+
+  if (!run.payload) {
+    return res.json({
+      ok: false,
+      message: run.stderr || run.message || "git could not be executed",
+    });
+  }
+  res.json(run.payload);
 });
 
 // ─── Knowledge Base ───────────────────────────────────────
 router.post("/knowledge/seed", (req, res) => {
-  const count = db.seedKnowledgeBase();
-  res.json({ inserted: count });
+  res.json({ inserted: db.seedKnowledgeBase() });
 });
 
-// ─── Build Simulation (local) ─────────────────────────────
-function runBuildSimulation(project) {
-  const files = db.listFiles(project.id);
-  const required =
-    project.rtos === "zephyr"
-      ? ["CMakeLists.txt", "prj.conf", "src/main.c"]
-      : ["CMakeLists.txt", "src/main.c", "src/FreeRTOSConfig.h"];
-  const paths = new Set(files.map((f) => f.path));
-  const missing = required.filter((p) => !paths.has(p));
-
-  if (missing.length > 0) {
-    const logs = `ERROR: missing required files: ${missing.join(", ")}`;
-    db.insertRun(project.id, "build", "failed", logs, `Missing: ${missing.join(", ")}`);
-    db.updateProjectStatus(project.id, "failed");
-    return { status: "failed", logs };
-  }
-
-  const buildLogs = [
-    `-- Build started for ${project.name} (${project.rtos})`,
-    `-- Target: ${project.board || "unspecified"}`,
-    `-- MCU: ${project.mcu || "unspecified"}`,
-    "",
-    "[cmake] Generating build files...",
-    "[cmake] Build files have been written to: build/",
-    "[build] Compiling src/main.c",
-    "[build] Linking target firmware.elf",
-    "[build] Built target: firmware.elf",
-    "",
-    "Build succeeded.",
-  ].join("\n");
-
-  db.insertRun(project.id, "build", "success", buildLogs, "Build succeeded for firmware.elf");
-
-  const testLogs = [
-    `-- Test run started for ${project.name}`,
-    "[test] main_task_returns_ok ........................... PASS",
-    "[test] static_allocation_is_used .................... PASS",
-    "[test] isr_safe_api_used ............................ PASS",
-    "",
-    "All tests passed.",
-  ].join("\n");
-
-  db.insertRun(project.id, "test", "success", testLogs, "All static checks passed");
-
-  db.updateProjectStatus(project.id, "ready");
-  return { status: "success", buildLogs, testLogs };
-}
+router.get("/knowledge", (req, res) => {
+  res.json(db.listKnowledgeDocuments());
+});
 
 module.exports = router;

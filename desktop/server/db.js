@@ -80,7 +80,34 @@ function initSchema() {
       content TEXT NOT NULL,
       tags TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS file_versions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      previous_content TEXT,
+      patch TEXT,
+      author TEXT NOT NULL DEFAULT 'agent',
+      reason TEXT,
+      build_verdict TEXT,
+      created_at INTEGER DEFAULT (unixepoch()),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
   `);
+
+  // Additive migrations for databases created by the earlier prototype.
+  ensureColumn("projects", "last_verdict", "TEXT");
+  ensureColumn("projects", "last_verification", "TEXT");
+  ensureColumn("projects", "last_build_at", "INTEGER");
+  ensureColumn("runs", "evidence", "TEXT");
+}
+
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some((entry) => entry.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 // ─── Users ────────────────────────────────────────────────
@@ -179,14 +206,127 @@ function listMessages(projectId) {
     .all(projectId);
 }
 
-// ─── Runs ─────────────────────────────────────────────────
-function insertRun(projectId, type, status, logs, summary) {
+// ─── Runs (honest evidence) ──────────────────────────────
+function insertRunLegacy(projectId, type, status, logs, summary) {
   const d = getDb();
   const id = uuidv4();
   d.prepare(
     "INSERT INTO runs (id, project_id, type, status, logs, summary) VALUES (?, ?, ?, ?, ?, ?)"
   ).run(id, projectId, type, status, logs || "", summary || null);
   return d.prepare("SELECT * FROM runs WHERE id = ?").get(id);
+}
+
+/**
+ * Stores a run with the verification/verdict model and updates the project
+ * verdict. `SUCCESS` is only possible with verification REAL and exitCode 0.
+ */
+function insertRun(projectId, evidence) {
+  const d = getDb();
+  const id = uuidv4();
+  const verification = evidence.verification || "NOT_AVAILABLE";
+  const verdict =
+    evidence.verdict ||
+    (evidence.exitCode === null || evidence.exitCode === undefined
+      ? "UNKNOWN"
+      : evidence.exitCode === 0
+        ? "SUCCESS"
+        : "FAILURE");
+  const honest =
+    verdict === "SUCCESS" && (verification !== "REAL" || evidence.exitCode !== 0)
+      ? "UNKNOWN"
+      : verdict;
+  const status = honest === "SUCCESS" ? "success" : honest === "FAILURE" ? "failed" : "pending";
+  const logs = [evidence.stdout, evidence.stderr].filter(Boolean).join("\n");
+
+  d.prepare(
+    "INSERT INTO runs (id, project_id, type, status, logs, summary, evidence) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).run(
+    id,
+    projectId,
+    evidence.type || "build",
+    status,
+    logs,
+    evidence.summary || `${verification} · ${honest}`,
+    JSON.stringify({ ...evidence, verdict: honest, verification }),
+  );
+
+  if ((evidence.type || "build") === "build") {
+    const projectStatus =
+      honest === "SUCCESS" && verification === "REAL"
+        ? "verified"
+        : honest === "FAILURE" && verification === "REAL"
+          ? "failed"
+          : "unverified";
+    d.prepare(
+      "UPDATE projects SET status = ?, last_verdict = ?, last_verification = ?, last_build_at = unixepoch() WHERE id = ?"
+    ).run(projectStatus, honest, verification, projectId);
+  }
+
+  return d.prepare("SELECT * FROM runs WHERE id = ?").get(id);
+}
+
+// ─── File versions ────────────────────────────────────────
+function insertVersion(projectId, filePath, version, content, meta = {}) {
+  const d = getDb();
+  const id = uuidv4();
+  d.prepare(
+    "INSERT INTO file_versions (id, project_id, path, version, content, previous_content, patch, author, reason, build_verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(
+    id,
+    projectId,
+    filePath,
+    version,
+    content,
+    meta.previousContent || null,
+    meta.patch || null,
+    meta.author || "agent",
+    meta.reason || null,
+    meta.buildVerdict || null,
+  );
+  return d.prepare("SELECT * FROM file_versions WHERE id = ?").get(id);
+}
+
+function listVersions(projectId) {
+  return getDb()
+    .prepare("SELECT * FROM file_versions WHERE project_id = ? ORDER BY created_at DESC, version DESC")
+    .all(projectId);
+}
+
+function getVersion(versionId) {
+  return getDb().prepare("SELECT * FROM file_versions WHERE id = ?").get(versionId);
+}
+
+function updateFileVersioned(projectId, filePath, content, meta = {}) {
+  const existing = getFile(projectId, filePath);
+  if (existing) {
+    const version = (existing.version || 1) + 1;
+    getDb()
+      .prepare("UPDATE project_files SET content = ?, version = ? WHERE id = ?")
+      .run(content, version, existing.id);
+    insertVersion(projectId, filePath, version, content, {
+      previousContent: existing.content,
+      ...meta,
+    });
+    return { ...existing, content, version };
+  }
+  const created = insertFile(projectId, filePath, content, inferFileType(filePath));
+  insertVersion(projectId, filePath, 1, content, meta);
+  return created;
+}
+
+// ─── Knowledge documents (for retrieval) ──────────────────
+function listKnowledgeDocuments() {
+  return getDb()
+    .prepare("SELECT * FROM knowledge_base")
+    .all()
+    .map((row) => ({
+      _id: row.id,
+      rtos: row.rtos,
+      category: row.category,
+      title: row.title,
+      content: row.content,
+      tags: row.tags ? String(row.tags).split(",").map((tag) => tag.trim()) : [],
+    }));
 }
 
 function listRuns(projectId) {
@@ -288,10 +428,16 @@ module.exports = {
   listFiles,
   getFile,
   updateFile,
+  updateFileVersioned,
+  insertVersion,
+  listVersions,
+  getVersion,
   insertMessage,
   listMessages,
   insertRun,
+  insertRunLegacy,
   listRuns,
+  listKnowledgeDocuments,
   seedKnowledgeBase,
   inferFileType,
 };

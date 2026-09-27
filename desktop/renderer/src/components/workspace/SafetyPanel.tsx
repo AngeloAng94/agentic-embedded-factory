@@ -1,119 +1,95 @@
-import { AlertCircle, CheckCircle2, Shield } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle2, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  analyzeProject,
+  safetyStatusBadge,
+  type SafetyFinding,
+  type SafetyStatus,
+} from "@core/safety";
 
-export interface ProjectFile {
-  path: string;
-  content: string;
-  type: string;
-}
-
+/**
+ * The desktop panel uses the SAME analyzer as the web app and the backend
+ * (`src/lib/core/safety.ts`) through the `@core` alias: rules, line numbers and
+ * severities cannot diverge between surfaces.
+ */
 interface SafetyPanelProps {
-  files: ProjectFile[];
-  rtos: "freertos" | "zephyr" | string;
+  files: { path: string; content: string; type?: string }[];
+  rtos: string;
 }
 
 export function SafetyPanel({ files, rtos }: SafetyPanelProps) {
-  const checks = runChecks(files, rtos);
-  const passed = checks.filter((c) => c.ok).length;
+  const report = analyzeProject(
+    files.map((file) => ({ path: file.path, content: file.content })),
+    rtos,
+  );
+  const badge = safetyStatusBadge(report);
 
   return (
     <div className="flex h-full flex-col border-l border-border/60 bg-card/30">
       <div className="border-b border-border/60 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        Safety Gate
+        Safety analysis
       </div>
-      <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground">
-        <Shield className="h-3.5 w-3.5" />
-        <span>
-          {passed}/{checks.length} checks passed
-        </span>
+      <div className="space-y-1 border-b border-border/60 px-4 py-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <Shield className="h-3.5 w-3.5" />
+          <span className={cn("font-semibold", statusColor(badge))}>{badge}</span>
+          <span>
+            {report.summary.pass} PASS · {report.summary.warning} WARNING · {report.summary.fail} FAIL
+          </span>
+        </div>
+        <p className="text-[10px] leading-relaxed opacity-80">
+          engine: {report.engine} — {report.limitations[0]} (not a clang AST)
+        </p>
       </div>
       <div className="flex-1 space-y-2 overflow-auto p-4">
-        {checks.map((check) => (
-          <div
-            key={check.id}
-            className={cn(
-              "rounded-lg border px-3 py-2 text-xs",
-              check.ok
-                ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-700"
-                : "border-red-500/20 bg-red-500/5 text-red-700",
-            )}
-          >
-            <div className="flex items-start gap-2">
-              {check.ok ? (
-                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              ) : (
-                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              )}
-              <div>
-                <p className="font-medium">{check.label}</p>
-                <p className="mt-0.5 opacity-80">{check.hint}</p>
-              </div>
-            </div>
-          </div>
+        {report.findings.map((finding, index) => (
+          <FindingCard key={`${finding.rule}-${index}`} finding={finding} />
         ))}
       </div>
     </div>
   );
 }
 
-function runChecks(files: ProjectFile[], rtos: string) {
-  const checks: { id: string; label: string; hint: string; ok: boolean }[] = [];
+function statusColor(status: SafetyStatus): string {
+  if (status === "FAIL") return "text-red-600";
+  if (status === "WARNING") return "text-amber-600";
+  return "text-emerald-600";
+}
 
-  const content = files.map((f) => f.content).join("\n");
-  const lower = content.toLowerCase();
+function FindingCard({ finding }: { finding: SafetyFinding }) {
+  const tone =
+    finding.status === "FAIL"
+      ? "border-red-500/20 bg-red-500/5 text-red-700"
+      : finding.status === "WARNING"
+        ? "border-amber-500/20 bg-amber-500/5 text-amber-700"
+        : "border-emerald-500/20 bg-emerald-500/5 text-emerald-700";
 
-  checks.push({
-    id: "entrypoint",
-    label: "Entrypoint present",
-    hint: "src/main.c should contain the main entrypoint.",
-    ok: files.some((f) => f.path === "src/main.c"),
-  });
-
-  checks.push({
-    id: "heap",
-    label: "Dynamic allocation minimised",
-    hint: "Avoid malloc/free in deterministic real-time paths.",
-    ok: !lower.includes("malloc(") && !lower.includes("free(") && !lower.includes("calloc(") && !lower.includes("realloc(") ,
-  });
-
-  if (rtos === "freertos") {
-    checks.push({
-      id: "static_alloc",
-      label: "Static allocation preferred",
-      hint: "Use xTaskCreateStatic and configSUPPORT_STATIC_ALLOCATION.",
-      ok: lower.includes("static allocation") || lower.includes("xtaskcreatestatic") || lower.includes("configsupport_static_allocation"),
-    });
-
-    checks.push({
-      id: "stack_overflow",
-      label: "Stack overflow guard",
-      hint: "Enable configCHECK_FOR_STACK_OVERFLOW in FreeRTOSConfig.h.",
-      ok: lower.includes("configcheck_for_stack_overflow"),
-    });
-
-    checks.push({
-      id: "isr_safe",
-      label: "ISR-safe API usage",
-      hint: "Use FromISR API variants inside interrupt handlers.",
-      ok: !lower.includes("printf(") || lower.includes("fromisr"),
-    });
-  }
-
-  if (rtos === "zephyr") {
-    checks.push({
-      id: "main_stack",
-      label: "Main stack configured",
-      hint: "CONFIG_MAIN_STACK_SIZE should be defined in prj.conf.",
-      ok: lower.includes("config_main_stack_size"),
-    });
-
-    checks.push({
-      id: "printk_safe",
-      label: "Logging via printk safe",
-      hint: "Use printk/LOG APIs, avoid printf in ISR context.",
-      ok: !lower.includes("printf(") || lower.includes("printk("),
-    });
-  }
-
-  return checks;
+  return (
+    <div className={cn("rounded-lg border px-3 py-2 text-xs", tone)}>
+      <div className="flex items-start gap-2">
+        {finding.status === "PASS" ? (
+          <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        ) : finding.status === "WARNING" ? (
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        )}
+        <div className="min-w-0">
+          <p className="font-medium">
+            {finding.status} · {finding.rule}
+          </p>
+          <p className="mt-0.5 font-mono text-[10px] opacity-80">
+            {finding.file}
+            {finding.line === null ? "" : `:${finding.line}`} · severity {finding.severity}
+          </p>
+          <p className="mt-1 opacity-90">{finding.explanation}</p>
+          {finding.snippet && (
+            <pre className="mt-1 overflow-x-auto rounded bg-background/60 px-2 py-1 font-mono text-[10px]">
+              {finding.snippet}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }

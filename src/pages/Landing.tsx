@@ -90,9 +90,9 @@ export default function Landing() {
             transition={{ duration: 0.6, delay: 0.2 }}
             className="mx-auto max-w-4xl text-4xl font-bold tracking-tight text-foreground sm:text-6xl lg:text-7xl"
           >
-            Build verified embedded firmware
+            Build embedded firmware
             <br />
-            <span className="text-muted-foreground">with agents.</span>
+            <span className="text-muted-foreground">you can actually verify.</span>
           </motion.h1>
           <motion.p
             variants={fadeIn}
@@ -132,7 +132,7 @@ export default function Landing() {
         <div className="mx-auto max-w-7xl">
           <div className="mb-12 max-w-2xl">
             <h2 className="text-3xl font-bold tracking-tight">
-              Everything to ship a verified RTOS project.
+              Everything to ship an RTOS project — with real build evidence.
             </h2>
             <p className="mt-3 text-muted-foreground">
               From natural-language requirement to a structured, buildable
@@ -158,7 +158,7 @@ export default function Landing() {
             <FeatureCard
               icon={<Workflow className="h-5 w-5" />}
               title="Build & verify loop"
-              description="Simulated builds, lint, static checks and tests loop until the project stabilizes."
+              description="Real west/CMake builds and static analysis loop until the project compiles. No simulated results, ever."
             />
             <FeatureCard
               icon={<ShieldCheck className="h-5 w-5" />}
@@ -200,7 +200,7 @@ export default function Landing() {
               {
                 step: "04",
                 title: "Ship",
-                text: "Download a ready-to-use GitHub repository with source code, configs, tests and documentation.",
+                text: "Export a ready-to-build project (ZIP) with sources, configs, README and a manifest carrying the real verification status.",
               },
             ].map((item) => (
               <motion.div
@@ -227,7 +227,7 @@ export default function Landing() {
       <section className="border-t border-border/60 bg-muted/20 px-6 py-20">
         <div className="mx-auto max-w-3xl rounded-3xl bg-card px-8 py-14 text-center ring-1 ring-border/70">
           <h2 className="text-3xl font-bold tracking-tight">
-            Ready to build verified firmware?
+            Ready to build firmware you can verify?
           </h2>
           <p className="mx-auto mt-4 max-w-lg text-muted-foreground">
             Create your first project and watch the agent generate a structured

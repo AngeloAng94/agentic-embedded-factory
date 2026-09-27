@@ -19,6 +19,10 @@ export type Role = Infer<typeof roleValidator>;
 export const rtosValidator = v.union(v.literal("freertos"), v.literal("zephyr"));
 export type Rtos = Infer<typeof rtosValidator>;
 
+/**
+ * `ready` is legacy and must never be written again: a project is only
+ * `verified` after a real, successful build, otherwise `unverified`.
+ */
 export const projectStatusValidator = v.union(
   v.literal("draft"),
   v.literal("requirements"),
@@ -27,8 +31,35 @@ export const projectStatusValidator = v.union(
   v.literal("testing"),
   v.literal("ready"),
   v.literal("failed"),
+  v.literal("unverified"),
+  v.literal("verified"),
 );
 export type ProjectStatus = Infer<typeof projectStatusValidator>;
+
+/** How a result was obtained. */
+export const verificationValidator = v.union(
+  v.literal("REAL"),
+  v.literal("SIMULATED"),
+  v.literal("NOT_AVAILABLE"),
+);
+export type Verification = Infer<typeof verificationValidator>;
+
+/** What the result was. */
+export const verdictValidator = v.union(
+  v.literal("SUCCESS"),
+  v.literal("FAILURE"),
+  v.literal("UNKNOWN"),
+);
+export type Verdict = Infer<typeof verdictValidator>;
+
+export const runTypeValidator = v.union(
+  v.literal("build"),
+  v.literal("test"),
+  v.literal("lint"),
+  v.literal("retrieval"),
+  v.literal("safety"),
+);
+export type RunType = Infer<typeof runTypeValidator>;
 
 export const fileTypeValidator = v.union(
   v.literal("c"),
@@ -75,6 +106,11 @@ const schema = defineSchema(
       description: v.optional(v.string()),
       architecture: v.optional(v.string()),
       config: v.optional(v.record(v.string(), v.any())),
+      /** Honest verification state, derived from the last real build. */
+      lastVerdict: v.optional(verdictValidator),
+      lastVerification: v.optional(verificationValidator),
+      lastBuildAt: v.optional(v.number()),
+      repairAttempts: v.optional(v.number()),
     })
       .index("userId", ["userId"])
       .index("by_user_status", ["userId", "status"]),
@@ -86,9 +122,33 @@ const schema = defineSchema(
       type: fileTypeValidator,
       version: v.number(),
       status: v.union(v.literal("current"), v.literal("stale")),
+      updatedAt: v.optional(v.number()),
     })
       .index("by_project", ["projectId", "path"])
       .index("by_project_type", ["projectId", "type"]),
+
+    /** Immutable history: every applied change keeps the previous content. */
+    fileVersions: defineTable({
+      projectId: v.id("projects"),
+      path: v.string(),
+      version: v.number(),
+      content: v.string(),
+      previousContent: v.optional(v.string()),
+      patch: v.optional(v.string()),
+      author: v.union(
+        v.literal("bootstrap"),
+        v.literal("agent"),
+        v.literal("user"),
+        v.literal("rollback"),
+      ),
+      reason: v.optional(v.string()),
+      createdAt: v.number(),
+      agentRunId: v.optional(v.string()),
+      buildRunId: v.optional(v.id("runs")),
+      buildVerdict: v.optional(verdictValidator),
+    })
+      .index("by_project_path", ["projectId", "path", "version"])
+      .index("by_project_created", ["projectId", "createdAt"]),
 
     messages: defineTable({
       projectId: v.id("projects"),
@@ -100,22 +160,41 @@ const schema = defineSchema(
       ),
       content: v.string(),
       toolCalls: v.optional(v.string()),
+      createdAt: v.optional(v.number()),
     })
       .index("by_project", ["projectId"]),
 
     runs: defineTable({
       projectId: v.id("projects"),
-      type: v.union(v.literal("build"), v.literal("test"), v.literal("lint")),
-      status: v.union(
-        v.literal("pending"),
-        v.literal("running"),
-        v.literal("success"),
-        v.literal("failed"),
+      type: runTypeValidator,
+      /** --- honest evidence (new model) --- */
+      verification: v.optional(verificationValidator),
+      verdict: v.optional(verdictValidator),
+      command: v.optional(v.string()),
+      toolchain: v.optional(v.string()),
+      exitCode: v.optional(v.number()),
+      durationMs: v.optional(v.number()),
+      stdout: v.optional(v.string()),
+      stderr: v.optional(v.string()),
+      artifacts: v.optional(v.array(v.string())),
+      reason: v.optional(v.string()),
+      attempt: v.optional(v.number()),
+      patchSummary: v.optional(v.string()),
+      /** --- legacy fields: old simulated rows stay readable, never trusted --- */
+      status: v.optional(
+        v.union(
+          v.literal("pending"),
+          v.literal("running"),
+          v.literal("success"),
+          v.literal("failed"),
+        ),
       ),
-      logs: v.string(),
+      logs: v.optional(v.string()),
       summary: v.optional(v.string()),
+      createdAt: v.optional(v.number()),
     })
-      .index("by_project", ["projectId"]),
+      .index("by_project", ["projectId"])
+      .index("by_project_type", ["projectId", "type"]),
 
     knowledgeBase: defineTable({
       rtos: v.union(v.literal("freertos"), v.literal("zephyr"), v.literal("general")),

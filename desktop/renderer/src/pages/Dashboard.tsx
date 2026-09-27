@@ -1,5 +1,12 @@
 import { useState, useEffect } from "react";
-import { api, type Project, type ProjectFile, type Message, type Run } from "../lib/api";
+import {
+  api,
+  parseEvidence,
+  type Project,
+  type ProjectFile,
+  type Message,
+  type Run,
+} from "../lib/api";
 import { Button } from "../components/ui/button";
 import { ProjectExplorer } from "../components/workspace/ProjectExplorer";
 import { FileViewer } from "../components/workspace/FileViewer";
@@ -92,9 +99,11 @@ export default function Dashboard() {
       const result = await api.bootstrapProject(prompt, rtos);
       setSelectedProjectId(result.projectId);
       setDialogOpen(false);
-      // Reload projects list
       api.getProjects().then(setProjects);
       refreshAll();
+      alert(
+        "Skeleton created — NOT built yet (unverified): no compiler was invoked.\n\nAsk the agent for the first iteration to get a real build result."
+      );
     } catch (err) {
       alert(`Bootstrap failed: ${err instanceof Error ? err.message : "Unknown error"}`);
     } finally {
@@ -106,35 +115,31 @@ export default function Dashboard() {
     if (!selectedProjectId) return;
     setIsSending(true);
     try {
-      // Save user message
-      await api.sendMessage(selectedProjectId, content);
-      setMessages((prev) => [...prev, { id: Date.now().toString(), project_id: selectedProjectId, role: "user", content }]);
-
-      // Build agent prompt
-      const contextFiles = files.map((f) => ({ path: f.path, content: f.content.slice(0, 2000) }));
-      const prompt = buildAgentPrompt(selectedProject!, contextFiles, content);
-
-      // Try Ollama
-      let agentResult: AgentResult;
-      try {
-        agentResult = await callOllama(prompt);
-      } catch (ollamaErr) {
-        agentResult = deterministicFallback(
-          selectedProject!.rtos,
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `local-${Date.now()}`,
+          project_id: selectedProjectId,
+          role: "user" as const,
           content,
-          ollamaErr instanceof Error ? ollamaErr.message : String(ollamaErr)
+        },
+      ]);
+
+      // The entire turn runs server-side: LLM call, patch validation, real build
+      // and the bounded repair loop. The browser never talks to a provider and
+      // never invents a build result.
+      const result = await api.runAgent(selectedProjectId, content);
+
+      if (!result.ok) {
+        alert(
+          result.code === "REPAIR_LIMIT_REACHED"
+            ? "BUILD FAILED — REPAIR LIMIT REACHED. Nothing else will be attempted automatically."
+            : `${result.code ?? "Agent error"}: ${
+                result.message ?? "no files were created or modified"
+              }`
         );
       }
 
-      // Apply patch
-      const patchResult = await api.applyAgentPatch(
-        selectedProjectId,
-        agentResult.message,
-        agentResult.files,
-        agentResult.requestBuild
-      );
-
-      // Reload data
       refreshAll();
     } catch (err) {
       alert(`Agent failed: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -147,7 +152,12 @@ export default function Dashboard() {
     if (!selectedProjectId) return;
     setIsRebuilding(true);
     try {
-      await api.runBuild(selectedProjectId);
+      const result = await api.runBuild(selectedProjectId);
+      if (!result.ok) {
+        alert(
+          "Build NOT AVAILABLE — no compiler was invoked.\n\nInstall bun/west (or configure the build command) and try again."
+        );
+      }
       refreshAll();
     } catch (err) {
       alert(`Rebuild failed: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -255,7 +265,12 @@ export default function Dashboard() {
                     </div>
                     <div className="w-[380px] shrink-0">
                       <ChatPanel
-                        messages={messages.map((m) => ({ role: m.role, content: m.content }))}
+                        messages={messages
+                          .filter((m) => m.role !== "tool")
+                          .map((m) => ({
+                            role: m.role as "user" | "assistant" | "system",
+                            content: m.content,
+                          }))}
                         onSend={handleSendMessage}
                         isLoading={isSending}
                         disabled={isBootstrapping}
@@ -264,9 +279,26 @@ export default function Dashboard() {
                   </div>
                   <div className="h-64 shrink-0 border-t border-border/60">
                     <BuildConsole
-                      runs={runs.map((r) => ({
-                        type: r.type, status: r.status, logs: r.logs, summary: r.summary,
-                      }))}
+                      runs={runs.map((run) => {
+                        const evidence = parseEvidence(run);
+                        return {
+                          id: run.id,
+                          type: run.type,
+                          verification: evidence.verification,
+                          verdict: evidence.verdict,
+                          command: evidence.command,
+                          toolchain: evidence.toolchain,
+                          exitCode: evidence.exitCode,
+                          durationMs: evidence.durationMs,
+                          stdout: evidence.stdout,
+                          stderr: evidence.stderr,
+                          artifacts: evidence.artifacts,
+                          reason: evidence.reason,
+                          attempt: evidence.attempt,
+                          summary: run.summary ?? null,
+                          legacy: evidence.legacy,
+                        };
+                      })}
                     />
                   </div>
                 </div>
@@ -304,90 +336,4 @@ export default function Dashboard() {
       />
     </div>
   );
-}
-
-// ─── Agent logic ──────────────────────────────────────────
-interface AgentResult {
-  message: string;
-  files: { path: string; content: string }[];
-  requestBuild: boolean;
-}
-
-function buildAgentPrompt(
-  project: { rtos: string; name: string; board?: string | null; mcu?: string | null },
-  files: { path: string; content: string }[],
-  userRequest: string
-): string {
-  const fileContext = files.map((f) => `--- ${f.path} ---\n${f.content}`).join("\n\n");
-  return `You are an expert embedded firmware engineer. The project uses ${project.rtos} and is named "${project.name}". Board: ${project.board || "unspecified"}, MCU: ${project.mcu || "unspecified"}.
-
-Current files:
-${fileContext || "(no files yet)"}
-
-User request:
-${userRequest}
-
-Respond with a single JSON object (no markdown) in this exact shape:
-{
-  "message": "Concise explanation of what you changed and why.",
-  "files": [
-    {"path": "src/<name>.c", "content": "full file content"}
-  ],
-  "requestBuild": true
-}`;
-}
-
-async function callOllama(prompt: string): Promise<AgentResult> {
-  const response = await fetch("http://localhost:11434/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "llama3", prompt, stream: false, format: "json" }),
-  });
-  if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
-  const data = (await response.json()) as { response?: string };
-  const text = data.response ?? "";
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("No JSON in Ollama response");
-  const parsed = JSON.parse(jsonMatch[0]);
-  return {
-    message: parsed.message ?? "No explanation.",
-    files: (parsed.files ?? []).filter((f: { path: string; content: string }) => f.path && f.content),
-    requestBuild: Boolean(parsed.requestBuild),
-  };
-}
-
-function deterministicFallback(rtos: string, userRequest: string, error: string): AgentResult {
-  const lower = userRequest.toLowerCase();
-  const files: { path: string; content: string }[] = [];
-
-  if (lower.includes("led")) {
-    files.push({
-      path: "src/led.c",
-      content: rtos === "zephyr"
-        ? `#include <zephyr/kernel.h>\n#include <zephyr/drivers/gpio.h>\n\n/* LED driver stub */`
-        : `#include "FreeRTOS.h"\n#include "task.h"\n\n/* LED driver stub */`,
-    });
-  }
-  if (lower.includes("sensor") || lower.includes("temperature") || lower.includes("temperatura")) {
-    files.push({
-      path: "src/sensor.c",
-      content: rtos === "zephyr"
-        ? `#include <zephyr/kernel.h>\n#include <zephyr/drivers/sensor.h>\n\n/* Temperature sensor driver stub */`
-        : `#include "FreeRTOS.h"\n#include "task.h"\n\n/* Temperature sensor driver stub */`,
-    });
-  }
-  if (files.length === 0) {
-    files.push({
-      path: "src/app.c",
-      content: rtos === "zephyr"
-        ? `#include <zephyr/kernel.h>\n#include <zephyr/sys/printk.h>\n\nvoid app_init(void) {\n    printk("App initialized.\\n");\n}\n`
-        : `#include "FreeRTOS.h"\n#include "task.h"\n#include <stdio.h>\n\nvoid app_init(void) {\n    printf("App initialized.\\n");\n}\n`,
-    });
-  }
-
-  return {
-    message: `Ollama not available (${error}). Applied deterministic fallback patch. Refine with Ollama for AI-generated code.`,
-    files,
-    requestBuild: true,
-  };
 }
