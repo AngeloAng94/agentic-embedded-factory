@@ -53,14 +53,22 @@ bun runner/index.ts serve --port 8790 --token <secret>
 
 Endpoints:
 
-| Method | Path       | Purpose                                          |
-| ------ | ---------- | ------------------------------------------------ |
-| GET    | `/health`  | fast probe: which tools are in PATH (`west`, …)  |
-| GET    | `/doctor`  | full environment report (READY / NOT_READY)      |
+| Method | Path        | Purpose                                             |
+| ------ | ----------- | --------------------------------------------------- |
+| GET    | `/health`   | fast probe: which tools are in PATH (`west`, …)     |
+| GET    | `/doctor`   | full environment report (READY / NOT_READY)         |
+| GET    | `/doctor?board=<name>` | same report, probing a specific board    |
 | POST   | `/build`   | real build of the posted files                   |
 | POST   | `/git`     | `git init` + `add` + `commit` on the posted files |
 | POST   | `/export`  | write the export tree to `outDir`                |
 | POST   | `/analyze` | return the safety analysis report                |
+
+`/doctor` always returns the full `boardsSupported` list read from `west boards`,
+and answers `200` when the environment is READY or `503` when it is NOT_READY —
+the HTTP status is itself the verdict. The web app's **Environment → Run
+diagnostics** button calls exactly these two endpoints through the Convex action
+`environmentActions.runDiagnostics`, and stores only non-secret evidence. It never
+fabricates a result, so an unreachable runner becomes `UNKNOWN`, not `READY`.
 
 Then set in the deployment environment:
 
@@ -68,6 +76,8 @@ Then set in the deployment environment:
 BUILD_RUNNER_URL=https://your-runner-host:8790
 BUILD_RUNNER_TOKEN=<the same secret>
 ```
+
+See [`../ENVIRONMENT.md`](../ENVIRONMENT.md) for the complete variable catalogue.
 
 ## Honest result contract
 

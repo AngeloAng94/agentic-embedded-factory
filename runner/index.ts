@@ -203,8 +203,12 @@ async function serve(flags: Record<string, string>): Promise<void> {
     }
 
     // Full environment diagnostic (spawns `west`/`cmake`/`python` to get versions).
+    // `?board=<name>` lets the caller ask about a specific board; the report
+    // still carries the full `boardsSupported` list read from `west boards`.
     if (req.method === "GET" && req.url?.startsWith("/doctor")) {
-      const report = await runDoctor(process.env);
+      const query = new URL(req.url, "http://127.0.0.1");
+      const board = query.searchParams.get("board")?.trim() || undefined;
+      const report = await runDoctor(process.env, { board });
       respond(report.ready ? 200 : 503, report);
       return;
     }

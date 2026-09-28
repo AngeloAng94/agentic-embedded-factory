@@ -34,6 +34,11 @@ LLM_MODEL=llama3
 BUILD_RUNNER_TOKEN=            # optional shared secret (HTTP runner mode)
 ```
 
+This is the same catalogue as the web app — see
+[`../ENVIRONMENT.md`](../ENVIRONMENT.md). Secrets stay server side in both
+variants; neither UI ever displays a key or a token (only *Configured* /
+*Not configured*), and neither one claims `READY`/`CONNECTED` without a real check.
+
 ## API
 
 | Method | Path                              | Purpose                                              |

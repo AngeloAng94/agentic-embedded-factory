@@ -102,7 +102,7 @@ export function resolveLlmConfig(
       ok: false,
       code: "LLM_NOT_CONFIGURED",
       reason:
-        "LLM_API_KEY is not set for a remote OpenAI-compatible provider. Add the key in the Keys/API keys panel.",
+        "LLM_API_KEY is not set for a remote OpenAI-compatible provider. Set it in the server environment (LLM_API_KEY) — see Environment → Settings for the exact variable.",
     };
   }
 
@@ -258,3 +258,69 @@ export async function callLlm(
 
 export const LLM_UNAVAILABLE_MESSAGE =
   "LLM unavailable — no files were created or modified and no build was started.";
+
+/* --------------------------------------------------------------- ai probe */
+
+/**
+ * The Settings page's "Test connection" result. Two outcomes only, both real:
+ * the provider answered, or it did not. Nothing here is inferred.
+ */
+export type LlmProbeResult =
+  | { state: "CONNECTED"; latencyMs: number; endpoint: string; model: string; message: string }
+  | {
+      state: "NOT_CONFIGURED";
+      message: string;
+      endpoint: null;
+      latencyMs: null;
+    }
+  | {
+      state: "CONNECTION_FAILED";
+      code: LlmErrorCode;
+      message: string;
+      endpoint: string | null;
+      latencyMs: number;
+    };
+
+const PROBE_PROMPT = 'Reply with exactly this JSON object and nothing else: {"ok":true}';
+
+/**
+ * Performs a real generation request with the configured provider/model. A
+ * successful probe proves base URL, credentials, model name and JSON output all
+ * work — which is exactly what an agent turn needs.
+ */
+export async function probeLlm(
+  config: LlmConfig,
+  options: { fetchImpl?: FetchLike; log?: (message: string) => void; timeoutMs?: number } = {},
+): Promise<LlmProbeResult> {
+  const started = Date.now();
+  const result = await callLlm(
+    {
+      ...config,
+      maxRetries: 0,
+      timeoutMs: Math.min(options.timeoutMs ?? config.timeoutMs, 20_000),
+      temperature: 0,
+    },
+    PROBE_PROMPT,
+    { fetchImpl: options.fetchImpl, log: options.log },
+  );
+
+  if (result.ok) {
+    return {
+      state: "CONNECTED",
+      latencyMs: result.durationMs,
+      endpoint: result.endpoint,
+      model: result.model,
+      message: `${config.provider} · ${result.model} answered in ${result.durationMs} ms`,
+    };
+  }
+
+  return {
+    state: "CONNECTION_FAILED",
+    code: result.code,
+    message: result.message,
+    endpoint: result.endpoint,
+    latencyMs: Date.now() - started,
+  };
+}
+
+export type { FetchLike };

@@ -203,6 +203,27 @@ const schema = defineSchema(
       content: v.string(),
       tags: v.optional(v.array(v.string())),
     }).index("by_rtos_category", ["rtos", "category"]),
+
+    /**
+     * Last real environment probes for a user.
+     *
+     * Only non-secret evidence is stored: LLM/runner configuration summaries
+     * (never keys or tokens), the RTOS capability states and the raw doctor
+     * output. The payloads are JSON strings parsed through the shared core
+     * model in `src/lib/core/environmentStatus.ts`, so the schema stays small
+     * while the type safety lives in one place.
+     */
+    environmentChecks: defineTable({
+      userId: v.id("users"),
+      llm: v.optional(v.string()),
+      runner: v.optional(v.string()),
+      zephyr: v.optional(v.string()),
+      freertos: v.optional(v.string()),
+      llmCheckedAt: v.optional(v.number()),
+      runnerCheckedAt: v.optional(v.number()),
+      diagnosticsAt: v.optional(v.number()),
+      checkedAt: v.number(),
+    }).index("by_user", ["userId"]),
   },
   {
     schemaValidation: false,

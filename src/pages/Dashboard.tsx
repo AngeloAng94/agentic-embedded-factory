@@ -12,11 +12,13 @@ import { BuildConsole, type BuildRunView } from "@/components/workspace/BuildCon
 import { NewProjectDialog } from "@/components/workspace/NewProjectDialog";
 import { SafetyPanel } from "@/components/workspace/SafetyPanel";
 import { VersionsPanel, type VersionEntry } from "@/components/workspace/VersionsPanel";
+import { ControlPlaneHeader } from "@/components/app/ControlPlaneHeader";
+import { StatusBadge } from "@/components/app/StatusIndicator";
+import { formatCheckedAt } from "@/components/app/statusFormat";
 import {
-  LayoutDashboard,
+  ArrowRight,
+  FolderOpen,
   Plus,
-  LogOut,
-  Cpu,
   Loader2,
   RefreshCw,
   ShieldCheck,
@@ -28,12 +30,24 @@ import {
 import { useNavigate } from "react-router";
 import { cn } from "@/lib/utils";
 import { buildProjectArchive, safeArchiveName } from "@/lib/core/projectExport";
+import {
+  capabilityLabel,
+  capabilityTone,
+  connectionLabel,
+  connectionTone,
+  onboardingSteps,
+  runnerLabel,
+  runnerTone,
+  type EnvironmentStatus,
+  type ProjectEnvironmentStatus,
+  type StatusTone,
+} from "@/lib/core/environmentStatus";
 import type { AgentCycleResult, GitInitActionResult } from "@/convex/lib/contracts";
 
 type RightPanel = "none" | "safety" | "history";
 
 export default function Dashboard() {
-  const { user, signOut } = useAuth();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -70,6 +84,12 @@ export default function Dashboard() {
     api.versions.list,
     selectedProjectId ? { projectId: selectedProjectId as never } : "skip",
   );
+  // Real environment status: server configuration + last real probe.
+  const environment = useQuery(api.environment.status, user ? {} : "skip");
+  const projectEnvironment = useQuery(
+    api.environment.projectEnvironment,
+    selectedProjectId ? { projectId: selectedProjectId as never } : "skip",
+  );
 
   const bootstrap = useMutation(api.orchestrator.bootstrapProject);
   const runCycle = useAction(api.agent.runCycle);
@@ -87,11 +107,6 @@ export default function Dashboard() {
     () => (files ?? []).map((file) => ({ path: file.path, content: file.content })),
     [files],
   );
-
-  const handleSignOut = async () => {
-    await signOut();
-    navigate("/");
-  };
 
   const reportCycleResult = (result: AgentCycleResult) => {
     if (result.ok) {
@@ -144,13 +159,20 @@ export default function Dashboard() {
     toast.error("Agent run failed", { description: result.message });
   };
 
-  const handleCreateProject = async (
-    prompt: string,
-    rtos: "freertos" | "zephyr",
-  ) => {
+  const handleCreateProject = async (config: {
+    name: string;
+    rtos: "freertos" | "zephyr";
+    board: string | null;
+    requirements: string;
+  }) => {
     setIsBootstrapping(true);
     try {
-      const created = await bootstrap({ userPrompt: prompt, rtos });
+      const created = await bootstrap({
+        userPrompt: config.requirements,
+        projectName: config.name,
+        rtos: config.rtos,
+        board: config.board ?? undefined,
+      });
       if ("error" in created) {
         toast.error("Could not create project", { description: created.message });
         return;
@@ -158,10 +180,15 @@ export default function Dashboard() {
       setSelectedProjectId(created.projectId);
       setDialogOpen(false);
       toast.success("Skeleton created (unverified)", {
-        description: "No compiler was invoked yet. Asking the agent for the first iteration…",
+        description: `No compiler was invoked yet${
+          config.board ? ` · board ${config.board} stays UNKNOWN / NOT VERIFIED until diagnostics list it` : ""
+        }. Asking the agent for the first iteration…`,
       });
 
-      const cycle = await runCycle({ projectId: created.projectId, userMessage: prompt });
+      const cycle = await runCycle({
+        projectId: created.projectId,
+        userMessage: config.requirements,
+      });
       reportCycleResult(cycle);
     } catch (error) {
       toast.error("Bootstrap failed", {
@@ -325,29 +352,12 @@ export default function Dashboard() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <header className="flex items-center justify-between border-b border-border/60 px-6 py-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <Cpu className="h-4 w-4" />
-          </div>
-          <h1 className="text-base font-semibold tracking-tight">EmbedFactory Workspace</h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button size="sm" onClick={() => setDialogOpen(true)} className="gap-1.5 rounded-full">
-            <Plus className="h-4 w-4" />
-            New project
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleSignOut}
-            className="gap-1.5 rounded-full"
-          >
-            <LogOut className="h-4 w-4" />
-            Sign out
-          </Button>
-        </div>
-      </header>
+      <ControlPlaneHeader title="EmbedFactory Workspace">
+        <Button size="sm" onClick={() => setDialogOpen(true)} className="gap-1.5 rounded-full">
+          <Plus className="h-4 w-4" />
+          New firmware
+        </Button>
+      </ControlPlaneHeader>
 
       <div className="flex flex-1 overflow-hidden">
         <aside className="flex w-64 flex-col border-r border-border/60 bg-muted/20">
@@ -398,7 +408,8 @@ export default function Dashboard() {
         <main className="flex flex-1 flex-col overflow-hidden">
           {selectedProjectId && selectedProject ? (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-4 py-2">
+              <div className="border-b border-border/60">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
                 <div>
                   <h2 className="text-sm font-semibold">{selectedProject.name}</h2>
                   <p className="text-xs text-muted-foreground">
@@ -467,6 +478,8 @@ export default function Dashboard() {
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
+                </div>
+                <ProjectEnvironmentStrip status={projectEnvironment} />
               </div>
 
               <div className="flex flex-1 overflow-hidden">
@@ -517,19 +530,12 @@ export default function Dashboard() {
               </div>
             </>
           ) : (
-            <div className="flex flex-1 flex-col items-center justify-center p-8 text-center">
-              <LayoutDashboard className="mb-4 h-12 w-12 text-muted-foreground/40" />
-              <h2 className="text-xl font-semibold tracking-tight">Welcome to EmbedFactory</h2>
-              <p className="mt-2 max-w-md text-sm text-muted-foreground">
-                Create a project, describe the firmware behaviour and let the agent produce
-                validated patches. Builds are only reported as successful when a real toolchain
-                exits 0.
-              </p>
-              <Button onClick={() => setDialogOpen(true)} className="mt-6 rounded-full px-6">
-                <Plus className="mr-2 h-4 w-4" />
-                Create project
-              </Button>
-            </div>
+            <ControlCenter
+              environment={environment}
+              onCreate={() => setDialogOpen(true)}
+              onOpenEnvironment={() => navigate("/environment")}
+              onOpenSettings={() => navigate("/settings")}
+            />
           )}
         </main>
       </div>
@@ -539,7 +545,234 @@ export default function Dashboard() {
         onOpenChange={setDialogOpen}
         onSubmit={handleCreateProject}
         isLoading={isBootstrapping}
+        environment={environment}
       />
+    </div>
+  );
+}
+
+/**
+ * The control center: what this deployment can really do right now, with the
+ * first-run checklist. Nothing is blocked — a missing capability is reported
+ * with its reason and a link to the page that fixes it.
+ */
+function ControlCenter({
+  environment,
+  onCreate,
+  onOpenEnvironment,
+  onOpenSettings,
+}: {
+  environment: EnvironmentStatus | undefined;
+  onCreate: () => void;
+  onOpenEnvironment: () => void;
+  onOpenSettings: () => void;
+}) {
+  if (!environment) {
+    return (
+      <div className="flex flex-1 items-center justify-center p-8 text-muted-foreground">
+        <Loader2 className="h-5 w-5 animate-spin" />
+      </div>
+    );
+  }
+
+  const rows: { label: string; tone: StatusTone; value: string; detail: string }[] = [
+    {
+      label: "AI",
+      tone: connectionTone(environment.llm.state),
+      value: connectionLabel(environment.llm.state),
+      detail: environment.llm.explicit
+        ? `${environment.llm.provider} · ${environment.llm.model ?? "model not set"}`
+        : `no LLM_* variable is set — built-in default ${environment.llm.provider} at ${
+            environment.llm.baseUrl ?? "?"
+          }`,
+    },
+    {
+      label: "Build runner",
+      tone: runnerTone(environment.runner.state),
+      value: runnerLabel(environment.runner.state),
+      detail: environment.runner.url ?? "BUILD_RUNNER_URL is not set",
+    },
+    {
+      label: "Zephyr",
+      tone: capabilityTone(environment.zephyr.state),
+      value: capabilityLabel(environment.zephyr.state),
+      detail:
+        environment.zephyr.toolchain ??
+        environment.zephyr.message ??
+        "run diagnostics to probe the toolchain",
+    },
+    {
+      label: "FreeRTOS",
+      tone: capabilityTone(environment.freertos.state),
+      value: capabilityLabel(environment.freertos.state),
+      detail: environment.freertos.message ?? "no FreeRTOS doctor exists yet",
+    },
+    {
+      label: "Toolchain",
+      tone: capabilityTone(environment.toolchain),
+      value: capabilityLabel(environment.toolchain),
+      detail: `last diagnostics: ${formatCheckedAt(environment.checkedAt)}`,
+    },
+  ];
+
+  return (
+    <div className="flex-1 overflow-auto">
+      <div className="mx-auto w-full max-w-3xl space-y-9 px-6 py-10">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Welcome to EmbedFactory</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Build, verify and repair embedded firmware with AI.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Button onClick={onCreate} className="rounded-full px-6">
+            <Plus className="mr-2 h-4 w-4" />
+            New Firmware
+          </Button>
+          <Button variant="outline" disabled className="cursor-not-allowed rounded-full px-6">
+            <FolderOpen className="mr-2 h-4 w-4" />
+            Existing Firmware
+            <span className="ml-2 rounded-full border px-2 py-0.5 text-[10px] tracking-wide uppercase">
+              Coming soon
+            </span>
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Existing Firmware will let you analyze and work on an existing embedded codebase. Import is
+          not implemented yet, so the entry point stays disabled instead of opening a screen that
+          does nothing.
+        </p>
+
+        <section>
+          <h3 className="text-xs font-semibold tracking-widest text-muted-foreground uppercase">
+            System status
+          </h3>
+          <div className="mt-3 divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60">
+            {rows.map((row) => (
+              <button
+                key={row.label}
+                type="button"
+                onClick={onOpenEnvironment}
+                className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+              >
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium tracking-widest uppercase">
+                    {row.label}
+                  </span>
+                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                    {row.detail}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <StatusBadge tone={row.tone} label={row.value} />
+                  <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <h3 className="text-xs font-semibold tracking-widest text-muted-foreground uppercase">
+            First run
+          </h3>
+          <ol className="mt-3 space-y-2">
+            {onboardingSteps(environment).map((step, index) => (
+              <li key={step.id} className="rounded-xl border border-border/60 px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="flex min-w-0 items-center gap-3">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-full border text-[11px] text-muted-foreground">
+                      {index + 1}
+                    </span>
+                    <span className="text-sm font-medium">{step.title}</span>
+                  </span>
+                  <StatusBadge tone={capabilityTone(step.state)} label={capabilityLabel(step.state)} />
+                </div>
+                <p className="mt-1.5 pl-9 text-xs break-words text-muted-foreground">{step.detail}</p>
+              </li>
+            ))}
+          </ol>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button onClick={onCreate} className="rounded-full px-6">
+              <Plus className="mr-2 h-4 w-4" />
+              Create first project
+            </Button>
+            <Button variant="outline" onClick={onOpenSettings} className="rounded-full">
+              Configure AI
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              Nothing here blocks you: a project can be created before the environment is complete —
+              it simply stays unverified.
+            </span>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/** The AI / BUILD / RTOS / BOARD strip inside a project. */
+function ProjectEnvironmentStrip({ status }: { status: ProjectEnvironmentStatus | undefined }) {
+  if (!status) return null;
+
+  const items = [
+    { label: "AI", tone: connectionTone(status.ai.state), value: connectionLabel(status.ai.state) },
+    {
+      label: "Build",
+      tone: capabilityTone(status.build.state),
+      value: capabilityLabel(status.build.state),
+    },
+    {
+      label: "RTOS",
+      tone: capabilityTone(status.rtos.state),
+      value: status.rtos.rtos === "zephyr" ? "Zephyr" : "FreeRTOS",
+    },
+    {
+      label: "Board",
+      tone: capabilityTone(status.board.state),
+      value: status.board.board ?? "not set",
+    },
+  ];
+
+  const reasons = [
+    status.ai.state === "CONNECTED" ? null : `AI — ${status.ai.message ?? "not tested"}`,
+    status.build.state === "READY" ? null : `BUILD — ${status.build.message ?? "not ready"}`,
+    status.rtos.state === "READY" ? null : `RTOS — ${status.rtos.message ?? "not verified"}`,
+    status.board.state === "READY" ? null : `BOARD — ${status.board.message ?? "not verified"}`,
+  ].filter((item): item is string => item !== null);
+
+  return (
+    <div className="space-y-1.5 border-t border-border/60 px-4 py-2">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
+        {items.map((item) => (
+          <span key={item.label} className="inline-flex items-center gap-2">
+            <span className="text-[10px] tracking-widest text-muted-foreground uppercase">
+              {item.label}
+            </span>
+            <StatusBadge tone={item.tone} label={item.value} />
+          </span>
+        ))}
+        {status.build.lastBuild ? (
+          <span className="text-[10px] text-muted-foreground">
+            last build {status.build.lastBuild.verification} · {status.build.lastBuild.verdict}
+            {status.build.lastBuild.exitCode === null
+              ? ""
+              : ` · exit ${status.build.lastBuild.exitCode}`}
+          </span>
+        ) : (
+          <span className="text-[10px] text-muted-foreground">no build run yet</span>
+        )}
+      </div>
+      {reasons.length > 0 ? (
+        <ul className="space-y-0.5">
+          {reasons.map((reason) => (
+            <li key={reason} className="font-mono text-[10px] leading-4 text-muted-foreground">
+              Reason: {reason}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

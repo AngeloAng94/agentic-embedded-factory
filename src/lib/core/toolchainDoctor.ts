@@ -14,33 +14,18 @@ import os from "node:os";
 import path from "node:path";
 import { resolveExecutable, runCommand } from "./buildEngine";
 
-export type DoctorStatus = "PASS" | "MISSING";
+// The status taxonomy, the default reference board and the report formatter all
+// live in environmentStatus so the UI and Convex can share them without pulling
+// in a Node probe. This module performs the real probing only.
+import {
+  DEFAULT_REFERENCE_BOARD,
+  formatDoctorReport,
+  type DoctorCheck,
+  type DoctorReport,
+} from "./environmentStatus";
 
-export interface DoctorCheck {
-  id: string;
-  label: string;
-  status: DoctorStatus;
-  required: boolean;
-  detail: string;
-}
-
-export interface DoctorReport {
-  environment: "READY" | "NOT_READY";
-  ready: boolean;
-  board: string;
-  checks: DoctorCheck[];
-  missing: string[];
-  zephyrBase: string | null;
-  zephyrSdk: string | null;
-  zephyrSdkVersion: string | null;
-  boardsSupported: string[] | null;
-  generatedAt: string;
-}
-
-/** A board that upstream Zephyr really ships a definition for. */
-export const DEFAULT_REFERENCE_BOARD = "nucleo_l476rg";
-
-const LABEL_WIDTH = 17;
+export type { DoctorCheck, DoctorReport, DoctorStatus } from "./environmentStatus";
+export { DEFAULT_REFERENCE_BOARD, formatDoctorReport };
 
 async function firstLine(
   program: string,
@@ -295,23 +280,4 @@ export async function runDoctor(
   };
 }
 
-/** The human-readable report printed by `bun runner/index.ts doctor`. */
-export function formatDoctorReport(report: DoctorReport): string {
-  const lines: string[] = [];
-  lines.push("EmbedFactory Environment");
-  lines.push("");
-  for (const entry of report.checks) {
-    const label = entry.label.padEnd(LABEL_WIDTH, " ");
-    const status = entry.status === "PASS" ? "PASS" : "MISSING";
-    lines.push(`${label} ${status.padEnd(7, " ")} ${entry.detail}`);
-  }
-  lines.push("");
-  lines.push(`${"Environment".padEnd(LABEL_WIDTH, " ")} ${report.environment}`);
-  lines.push(`${"Board".padEnd(LABEL_WIDTH, " ")} ${report.board}`);
-  if (!report.ready) {
-    lines.push("");
-    lines.push("Missing:");
-    for (const item of report.missing) lines.push(`- ${item}`);
-  }
-  return lines.join("\n");
-}
+

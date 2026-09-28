@@ -29,6 +29,7 @@ WEB (Vite + React + Convex)
   agent action       → server-side LLM + patch validation + build dispatch
   build job          → BUILD_RUNNER_URL → runner → real Zephyr/FreeRTOS toolchain
   export             → real ZIP built in the browser (files + README + manifest)
+  control plane      → Dashboard · Environment · Settings, fed by real probes
 
 RUNNER (bun runner/index.ts)  ← the ONLY component that runs native toolchains
   doctor | verify | build | git | analyze | export | serve
@@ -164,23 +165,51 @@ FLASH/RAM usage and the ZIP export manifest — which carries the board profile:
 
 If the Zephyr toolchain is not installed the command prints
 `SKIPPED — Zephyr toolchain unavailable` and exits non-zero. It never fabricates
-a build.
+a build.## Control plane (Dashboard · Environment · Settings)
+
+The UI always answers one question: **what is ready, what is not, and why.**
+
+| Level           | What it shows                                                                 |
+| --------------- | ----------------------------------------------------------------------------- |
+| **Dashboard**   | `Welcome to EmbedFactory` → `New Firmware` / `Existing Firmware` (disabled: import is not implemented), then `SYSTEM STATUS` for AI · Build runner · Zephyr · FreeRTOS · Toolchain, then the first-run checklist (`Connect AI` → `Check build runner` → `Zephyr toolchain` → `FreeRTOS`). Every status row links to Environment. |
+| **Environment** | The real diagnostics: AI (provider, model, connection, last check), build runner (URL, status, tools reported by `GET /health`), the Zephyr doctor table (west, cmake, ninja, python, dtc, `ZEPHYR_BASE`, Zephyr SDK, `arm-zephyr-eabi`, board), board detection and the raw doctor output. **Run diagnostics** really calls `GET /doctor` on the runner. |
+| **Settings**     | The server-side configuration (AI/LLM, build runner) with a real **Test connection** (one generation request) and a real **Test runner** (`GET /health`). Secrets are shown as *Configured* / *Not configured* only. |
+
+Inside a project a strip always shows `AI · BUILD · RTOS · BOARD` with the
+reason whenever something is not ready (e.g. `BUILD NOT AVAILABLE — reason:
+BUILD_RUNNER_URL is not set`).
+
+Nothing is inferred:
+
+- `CONNECTED` requires a real answer from the provider/runner;
+- `READY` for Zephyr requires a doctor report with every required check `PASS`;
+- a board is `READY` only if `west boards` really listed it, otherwise
+  `UNKNOWN / NOT VERIFIED` or `NOT_READY`;
+- FreeRTOS is `NOT_CONFIGURED`, because no FreeRTOS doctor exists yet;
+- a stored probe is discarded as soon as the configuration it probed changes.
 
 ## Environment variables (server-side only)
+
+Every variable is documented with its purpose and default in
+[`ENVIRONMENT.md`](ENVIRONMENT.md) — the same catalogue the Settings page
+renders (`ENV_VAR_DOCS` in `src/lib/core/environmentStatus.ts`), so docs and UI
+cannot drift apart. The short version:
 
 | Variable                       | Purpose                                                   |
 | ------------------------------ | --------------------------------------------------------- |
 | `LLM_PROVIDER`                 | `ollama` (default) or `openai` (any OpenAI-compatible API) |
 | `LLM_BASE_URL`                 | e.g. `http://localhost:11434` or `https://api.openai.com/v1` |
-| `LLM_API_KEY`                  | required for remote OpenAI-compatible endpoints            |
+| `LLM_API_KEY`                  | **secret** — required for remote OpenAI-compatible endpoints |
 | `LLM_MODEL`                    | model name (default `llama3` / `gpt-4o-mini`)              |
 | `LLM_TIMEOUT_MS`, `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` | provider tuning          |
 | `BUILD_RUNNER_URL`             | runner HTTP endpoint (`bun runner/index.ts serve`)         |
-| `BUILD_RUNNER_TOKEN`           | shared secret for the runner                               |
-| `EMBEDFACTORY_BUILD_COMMAND`   | force a specific build command (runner side)               |
+| `BUILD_RUNNER_TOKEN`           | **secret** — shared secret for the runner                  |
+| `ZEPHYR_BASE`, `ZEPHYR_SDK_INSTALL_DIR`, `EMBEDFACTORY_BOARD`, `EMBEDFACTORY_BUILD_COMMAND` | runner-side toolchain settings |
 
-Keys are read with `process.env` inside Convex node actions / the runner: they
-are never sent to the browser.
+Secrets are read with `process.env` inside Convex node actions / the runner, are
+never sent to the browser, never written to `localStorage` and never included in
+an API response or a log line.
+
 
 ## Development
 
@@ -193,6 +222,9 @@ bun runner/index.ts doctor                 # is this machine able to build firmw
 bun runner/index.ts verify --board nucleo_l476rg   # real failure -> repair -> success
 ```
 
+The same report is what **Environment → Run diagnostics** fetches over
+`GET /doctor`, and what the Dashboard's `SYSTEM STATUS` summarizes.
+
 ## Tests
 
 `bun test` covers: cross-user authorization on every handler, path sandboxing,
@@ -200,6 +232,13 @@ unified-diff validation (`PATCH_FAILED`), LLM failure isolation, honest build
 statuses, the repair loop and limit, real process execution (real compiler,
 real exit codes, real artifacts), runner CLI contract, ZIP validity (verified
 with Python's `zipfile`), knowledge retrieval budget and the safety rules.
+
+The control plane has its own suite (`src/__tests__/environmentStatus.test.ts`):
+environment status normalization, LLM configured/not-configured, secret masking
+(`Configured` / `Not configured`, and that a key or token never appears in a
+resolved status), runner states, toolchain aggregation, board availability,
+first-run checklist and the project environment query (a stale probe from a
+different runner is discarded, never recycled).
 
 The Zephyr-specific tests are **gated on the real toolchain**: they parse the
 ELF header from real bytes, parse a real linker memory report, and — when the

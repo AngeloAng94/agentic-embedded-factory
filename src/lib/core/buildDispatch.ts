@@ -20,6 +20,9 @@ import type {
   Verification,
 } from "./types";
 import { emptyBuildResult } from "./types";
+// Type-only import: keeps the runner state vocabulary in one place with no
+// runtime cycle (environmentStatus imports resolveRunnerConfig from here).
+import type { RunnerState } from "./environmentStatus";
 
 export interface RunnerConfig {
   url: string | null;
@@ -274,4 +277,145 @@ export function notAvailableFromDispatch(
   const result = emptyBuildResult("NOT_AVAILABLE", `build runner: ${code} — ${message}`);
   result.attempt = attempt;
   return result;
+}
+
+/* ------------------------------------------------------- runner health probe */
+
+/** "UNKNOWN" is not a probe result: a probe always has a real answer. */
+export type RunnerProbeState = Exclude<RunnerState, "UNKNOWN">;
+
+export interface RunnerProbe {
+  state: RunnerProbeState;
+  message: string | null;
+  latencyMs: number | null;
+  /** Tool presence reported by `GET /health` (filesystem lookups only). */
+  tools: Record<string, boolean> | null;
+  zephyrBase: string | null;
+  /** Doctor report from `GET /doctor`, when it was requested. */
+  doctor: unknown | null;
+}
+
+const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
+
+/**
+ * Really calls the runner: `GET /health` (reachability + auth) and optionally
+ * `GET /doctor` (toolchain evidence). A 503 from `/doctor` is a *valid* answer
+ * meaning NOT_READY, not a transport failure.
+ */
+export async function probeRunnerHealth(
+  config: RunnerConfig,
+  options: {
+    fetchImpl?: FetchLike;
+    timeoutMs?: number;
+    includeDoctor?: boolean;
+    log?: (message: string) => void;
+  } = {},
+): Promise<RunnerProbe> {
+  const log = options.log ?? (() => {});
+  if (!config.url) {
+    return {
+      state: "NOT_CONFIGURED",
+      message: "BUILD_RUNNER_URL is not set: native toolchains cannot run from this deployment.",
+      latencyMs: null,
+      tools: null,
+      zephyrBase: null,
+      doctor: null,
+    };
+  }
+
+  const doFetch: FetchLike = options.fetchImpl ?? ((input, init) => fetch(input, init));
+  const headers: Record<string, string> = {};
+  if (config.token) headers.Authorization = `Bearer ${config.token}`;
+  const timeoutMs = Math.min(options.timeoutMs ?? config.timeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
+
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    log(`[runner] probing ${config.url}/health`);
+    const response = await doFetch(`${config.url}/health`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+    const latencyMs = Date.now() - started;
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        state: "AUTHENTICATION_FAILED",
+        message: `runner rejected the token (HTTP ${response.status})`, tools: null,
+        latencyMs,
+        zephyrBase: null,
+        doctor: null,
+      };
+    }
+    if (!response.ok) {
+      return {
+        state: "UNAVAILABLE",
+        message: `runner answered HTTP ${response.status} on /health`,
+        latencyMs,
+        tools: null,
+        zephyrBase: null,
+        doctor: null,
+      };
+    }
+
+    const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!payload || typeof payload !== "object") {
+      return {
+        state: "UNAVAILABLE",
+        message: "runner /health did not answer with JSON",
+        latencyMs,
+        tools: null,
+        zephyrBase: null,
+        doctor: null,
+      };
+    }
+
+    const rawTools = payload.tools;
+    const tools: Record<string, boolean> = {};
+    if (rawTools && typeof rawTools === "object") {
+      for (const [key, value] of Object.entries(rawTools as Record<string, unknown>)) {
+        tools[key] = value === true;
+      }
+    }
+
+    let doctor: unknown = null;
+    if (options.includeDoctor) {
+      try {
+        log(`[runner] probing ${config.url}/doctor`);
+        const doctorResponse = await doFetch(`${config.url}/doctor`, { method: "GET", headers });
+        // 200 = READY, 503 = NOT_READY: both are real doctor answers.
+        if (doctorResponse.ok || doctorResponse.status === 503) {
+          doctor = await doctorResponse.json().catch(() => null);
+        }
+      } catch {
+        doctor = null;
+      }
+    }
+
+    return {
+      state: "CONNECTED",
+      message: null,
+      latencyMs,
+      tools: Object.keys(tools).length > 0 ? tools : null,
+      zephyrBase: typeof payload.zephyr_base === "string" ? payload.zephyr_base : null,
+      doctor,
+    };
+  } catch (error) {
+    const aborted = error instanceof Error && error.name === "AbortError";
+    return {
+      state: "UNAVAILABLE",
+      message: aborted
+        ? "runner did not answer before the timeout"
+        : `runner unreachable: ${error instanceof Error ? error.message : String(error)}`,
+      latencyMs: Date.now() - started,
+      tools: null,
+      zephyrBase: null,
+      doctor: null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }

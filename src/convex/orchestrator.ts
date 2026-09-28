@@ -13,11 +13,21 @@ import { MAX_REPAIR_ATTEMPTS } from "../lib/core/buildStatus";
  * It deliberately does NOT run a build: only a real toolchain can verify a
  * project, so the project stays `unverified` until a real build succeeds.
  */
+/** Zephyr board names are lower case identifiers: nucleo_l476rg, native_sim, ... */
+const BOARD_PATTERN = /^[a-z0-9][a-z0-9_/.-]{1,62}$/;
+
 export const bootstrapProject = mutation({
   args: {
     userPrompt: v.string(),
     projectName: v.optional(v.string()),
     rtos: v.optional(v.union(v.literal("freertos"), v.literal("zephyr"))),
+    /**
+     * Board chosen in the create dialog. It is stored as *requested*, not as
+     * verified: only a real `west boards` list (Environment → diagnostics) can
+     * turn it into READY, which `projectEnvironment` decides.
+     */
+    board: v.optional(v.string()),
+    mcu: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -35,8 +45,20 @@ export const bootstrapProject = mutation({
       };
     }
 
-    const name = args.projectName ?? detectProjectName(prompt, detectedRtos);
+    const name = args.projectName?.trim() || detectProjectName(prompt, detectedRtos);
     const now = Date.now();
+
+    // An explicit board from the UI wins over prompt detection, but it is
+    // validated as a board identifier and never presented as verified.
+    const requestedBoard = args.board?.trim().toLowerCase() ?? null;
+    if (requestedBoard !== null && !BOARD_PATTERN.test(requestedBoard)) {
+      return {
+        error: "INVALID_BOARD" as const,
+        message: `"${args.board}" is not a valid board identifier (expected something like nucleo_l476rg).`,
+      };
+    }
+    const board = requestedBoard ?? detectBoard(prompt);
+    const mcu = args.mcu?.trim() || detectMcu(prompt);
 
     const projectId = await ctx.db.insert("projects", {
       userId: userId as Id<"users">,
@@ -44,8 +66,8 @@ export const bootstrapProject = mutation({
       rtos: detectedRtos,
       status: "draft",
       description: prompt,
-      board: detectBoard(prompt) ?? undefined,
-      mcu: detectMcu(prompt) ?? undefined,
+      board: board ?? undefined,
+      mcu: mcu ?? undefined,
       repairAttempts: 0,
     });
 
@@ -74,6 +96,7 @@ export const bootstrapProject = mutation({
     const assistantMessage = `## Project created: ${name}
 
 - **RTOS:** ${detectedRtos}
+- **Board:** ${board ?? "not set"} — UNKNOWN / NOT VERIFIED until diagnostics list the boards west knows
 - **Files:** ${files.map((file) => file.path).join(", ")}
 - **Build:** NOT RUN — no compiler was invoked, so nothing is verified yet.
 - **Status:** unverified
