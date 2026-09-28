@@ -227,6 +227,8 @@ export default function Dashboard() {
         verification: selectedProject.lastVerification
           ? `${selectedProject.lastVerification} · ${selectedProject.lastVerdict ?? "UNKNOWN"}`
           : "NOT_VERIFIED",
+        verdict: selectedProject.lastVerdict ?? "UNKNOWN",
+        toolchain: selectedProject.toolchain ?? null,
       },
     );
 
@@ -241,7 +243,9 @@ export default function Dashboard() {
     URL.revokeObjectURL(url);
 
     toast.success("Project exported", {
-      description: `${manifest.fileCount} file(s) + manifest + README, verification: ${manifest.verification}`,
+      description: `${manifest.fileCount} file(s) + manifest + README · ${manifest.boardProfile.verification} · board ${
+        manifest.boardProfile.board ?? "unspecified"
+      }`,
     });
   };
 

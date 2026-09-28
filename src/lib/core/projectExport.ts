@@ -4,7 +4,19 @@ import { createZip, type ZipEntry } from "./zip";
 /**
  * Project export: turns the stored project into a real, buildable tree
  * (files + configs + generated README + manifest) and into ZIP bytes.
+ *
+ * The manifest records which board and toolchain the project is meant for, and
+ * — honestly — whether the last build was REAL/SUCCESS or not. A manifest that
+ * says `verification: "NOT_VERIFIED"` means no compiler was ever executed.
  */
+
+export interface BoardProfile {
+  rtos: string;
+  board: string | null;
+  toolchain: string | null;
+  verification: string;
+  verdict: string;
+}
 
 export interface ExportManifest {
   tool: "EmbedFactory";
@@ -13,12 +25,16 @@ export interface ExportManifest {
   rtos: string;
   board: string | null;
   mcu: string | null;
+  toolchain: string | null;
   exportedAt: string;
   fileCount: number;
   files: { path: string; bytes: number; hash: string }[];
   hashAlgorithm: "fnv1a-32";
   verification: string;
+  verdict: string;
   buildCommand: string;
+  /** Board profile of the build this export belongs to. */
+  boardProfile: BoardProfile;
 }
 
 export function fnv1a(value: string): string {
@@ -33,24 +49,38 @@ export function fnv1a(value: string): string {
 export function buildCommandFor(rtos: string, board: string | null): string {
   if (rtos === "zephyr") {
     const boardArg = board ? ` -b ${board}` : " -b <board>";
-    return `west build${boardArg} -p always`;
+    return `west build${boardArg} -d build -p auto`;
   }
   return "cmake -S . -B build && cmake --build build";
+}
+
+export interface ExportOptions {
+  exportedAt?: Date;
+  /** "REAL · SUCCESS", "NOT_VERIFIED", ... */
+  verification?: string;
+  verdict?: string;
+  toolchain?: string | null;
 }
 
 export function buildProjectManifest(
   project: ProjectLike,
   files: { path: string; content: string }[],
-  exportedAt: Date = new Date(),
-  verification = "NOT_VERIFIED",
+  options: ExportOptions = {},
 ): ExportManifest {
+  const exportedAt = options.exportedAt ?? new Date();
+  const verification = options.verification ?? "NOT_VERIFIED";
+  const verdict = options.verdict ?? "UNKNOWN";
+  const toolchain = options.toolchain ?? null;
+  const board = project.board ?? null;
+
   return {
     tool: "EmbedFactory",
     manifestVersion: 1,
     name: project.name,
     rtos: project.rtos,
-    board: project.board ?? null,
+    board,
     mcu: project.mcu ?? null,
+    toolchain,
     exportedAt: exportedAt.toISOString(),
     fileCount: files.length,
     files: files
@@ -62,7 +92,15 @@ export function buildProjectManifest(
       .sort((a, b) => a.path.localeCompare(b.path)),
     hashAlgorithm: "fnv1a-32",
     verification,
-    buildCommand: buildCommandFor(project.rtos, project.board ?? null),
+    verdict,
+    buildCommand: buildCommandFor(project.rtos, board),
+    boardProfile: {
+      rtos: project.rtos,
+      board,
+      toolchain,
+      verification,
+      verdict,
+    },
   };
 }
 
@@ -85,7 +123,8 @@ ${command}
 ## Verification status
 
 A build only counts as verified when a real toolchain was executed.
-Check \`embedfactory.manifest.json\` (\`verification\` field) before trusting a build result.
+Check \`embedfactory.manifest.json\` (\`verification\`, \`verdict\` and \`boardProfile\`)
+before trusting a build result.
 `;
 }
 
@@ -93,8 +132,21 @@ export function generatedBuildDoc(project: ProjectLike): string {
   const command = buildCommandFor(project.rtos, project.board ?? null);
   const prerequisites =
     project.rtos === "zephyr"
-      ? `- Zephyr SDK + \`west\` in PATH\n- \`ZEPHYR_BASE\` pointing to the Zephyr checkout (or run \`west init -l .\`)`
-      : `- cmake + a C toolchain (arm-none-eabi-gcc or host gcc)\n- FreeRTOS-Kernel checkout in \`third_party/FreeRTOS-Kernel\``;
+      ? `- Zephyr SDK + \`west\` in PATH
+- \`cmake\`, \`ninja\`, \`python3\`, \`dtc\`
+- \`ZEPHYR_BASE\` pointing to the Zephyr checkout (or run \`west init -l .\`)
+- ARM toolchain from the SDK: \`arm-zephyr-eabi-gcc\`
+
+Check your machine before building:
+
+\`\`\`bash
+bun runner/index.ts doctor
+\`\`\`
+
+The doctor prints \`Environment READY\` or \`NOT_READY\` with a \`Missing:\` list.
+It never falls back to a simulated build.`
+      : `- cmake + a C toolchain (arm-none-eabi-gcc or host gcc)
+- FreeRTOS-Kernel checkout in \`third_party/FreeRTOS-Kernel\``;
 
   return `# Build instructions
 
@@ -111,7 +163,9 @@ ${command}
 ## Build through the local runner (captures real stdout/stderr/exit code)
 
 \`\`\`bash
-bun runner/index.ts build --dir . --json
+bun runner/index.ts build --dir . --rtos ${project.rtos}${
+    project.board ? ` --board ${project.board}` : ""
+  } --json
 \`\`\`
 
 The runner reports \`verification=NOT_AVAILABLE\` when the toolchain is missing.
@@ -138,15 +192,10 @@ node_modules/
 export function buildExportEntries(
   project: ProjectLike,
   files: { path: string; content: string }[],
-  options: { exportedAt?: Date; verification?: string } = {},
+  options: ExportOptions = {},
 ): { entries: ZipEntry[]; manifest: ExportManifest } {
   const exportedAt = options.exportedAt ?? new Date();
-  const manifest = buildProjectManifest(
-    project,
-    files,
-    exportedAt,
-    options.verification ?? "NOT_VERIFIED",
-  );
+  const manifest = buildProjectManifest(project, files, { ...options, exportedAt });
 
   const byPath = new Map(files.map((file) => [file.path, file.content]));
   const entries: ZipEntry[] = files.map((file) => ({
@@ -173,10 +222,11 @@ export function buildExportEntries(
 export function buildProjectArchive(
   project: ProjectLike,
   files: { path: string; content: string }[],
-  options: { exportedAt?: Date; verification?: string } = {},
+  options: ExportOptions = {},
 ): { bytes: Uint8Array; manifest: ExportManifest; entries: ZipEntry[] } {
-  const { entries, manifest } = buildExportEntries(project, files, options);
-  const bytes = createZip(entries, options.exportedAt ?? new Date());
+  const exportedAt = options.exportedAt ?? new Date();
+  const { entries, manifest } = buildExportEntries(project, files, { ...options, exportedAt });
+  const bytes = createZip(entries, exportedAt);
   return { bytes, manifest, entries };
 }
 

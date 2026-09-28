@@ -14,6 +14,12 @@ import { accessSync, constants, existsSync, readdirSync, statSync } from "node:f
 import path from "node:path";
 import type { BuildResult } from "./types";
 import { notAvailable, realResult } from "./buildStatus";
+import {
+  inspectArtifacts,
+  mergeMemoryUsage,
+  parseGnuSize,
+  parseMemoryReport,
+} from "./artifactInspect";
 
 export const DEFAULT_BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -257,21 +263,53 @@ export interface ProjectBuildInput {
   commandOverride?: string | null;
   timeoutMs?: number;
   attempt?: number;
+  /** Extra environment variables for the build process (e.g. ZEPHYR_BASE). */
+  env?: Record<string, string>;
+}
+
+/** Reads text/data/bss from the binutils `size` tool, when it is installed. */
+async function sizeSections(
+  cwd: string,
+  elfRelativePath: string | undefined,
+): Promise<{ text: number; data: number; bss: number } | null> {
+  if (!elfRelativePath) return null;
+  for (const candidate of ["arm-zephyr-eabi-size", "size"]) {
+    if (!resolveExecutable(candidate)) continue;
+    const outcome = await runCommand(
+      { program: candidate, args: [elfRelativePath], display: `${candidate} ${elfRelativePath}` },
+      { cwd, timeoutMs: 15_000 },
+    );
+    if (outcome.ok && outcome.exitCode === 0) {
+      const parsed = parseGnuSize(outcome.stdout);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+function withBoardProfile(result: BuildResult, input: ProjectBuildInput): BuildResult {
+  result.rtos = input.rtos;
+  result.board = input.board ?? null;
+  return result;
 }
 
 export async function runProjectBuild(input: ProjectBuildInput): Promise<BuildResult> {
   const spec = buildCommandForProject(input);
 
   if (!resolveExecutable(spec.program)) {
-    return notAvailable(
-      `toolchain unavailable: "${spec.program}" is not installed or not in PATH`,
-      spec.display,
+    return withBoardProfile(
+      notAvailable(
+        `toolchain unavailable: "${spec.program}" is not installed or not in PATH`,
+        spec.display,
+      ),
+      input,
     );
   }
 
   const outcome = await runCommand(spec, {
     cwd: input.dir,
     timeoutMs: input.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
+    env: input.env,
   });
 
   if (!outcome.ok) {
@@ -280,23 +318,35 @@ export async function runProjectBuild(input: ProjectBuildInput): Promise<BuildRe
       result.stdout = outcome.stdout;
       result.stderr = outcome.stderr;
       result.durationMs = outcome.durationMs;
-      return result;
+      return withBoardProfile(result, input);
     }
-    return notAvailable(outcome.message, spec.display);
+    return withBoardProfile(notAvailable(outcome.message, spec.display), input);
   }
 
   const version = await toolchainVersion(spec.program, input.dir);
   const artifacts = collectArtifacts(input.dir);
-  return realResult({
-    command: spec.display,
-    exitCode: outcome.exitCode,
-    durationMs: outcome.durationMs,
-    stdout: outcome.stdout,
-    stderr: outcome.stderr,
-    artifacts,
-    attempt: input.attempt ?? 1,
-    toolchain: version,
-  });
+
+  // Real, byte-level validation of every artifact the build produced.
+  const artifactDetails = inspectArtifacts(input.dir, artifacts);
+  const elfArtifact = artifacts.find((entry) => entry.toLowerCase().endsWith(".elf"));
+  const sections = await sizeSections(input.dir, elfArtifact);
+
+  return withBoardProfile(
+    realResult({
+      command: spec.display,
+      exitCode: outcome.exitCode,
+      durationMs: outcome.durationMs,
+      stdout: outcome.stdout,
+      stderr: outcome.stderr,
+      artifacts,
+      artifactDetails,
+      // Prefer the linker's own report; fall back to the `size` tool.
+      memory: mergeMemoryUsage(parseMemoryReport(outcome.stdout), sections),
+      attempt: input.attempt ?? 1,
+      toolchain: version,
+    }),
+    input,
+  );
 }
 
 export type GitOutcome =

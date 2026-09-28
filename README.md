@@ -31,7 +31,7 @@ WEB (Vite + React + Convex)
   export             → real ZIP built in the browser (files + README + manifest)
 
 RUNNER (bun runner/index.ts)  ← the ONLY component that runs native toolchains
-  build | git | analyze | export | serve
+  doctor | verify | build | git | analyze | export | serve
 ```
 
 Convex cannot execute `west`/`cmake`, so the web app never fakes a build: without
@@ -55,6 +55,117 @@ user prompt → knowledge retrieval (logged) → LLM (server-side)
 - If the provider is unreachable the turn fails explicitly: **no files created,
   no file modified, no build started**.
 
+## Real Zephyr toolchain (the vertical slice)
+
+The engine is proven against a **real** toolchain on the machine that owns one.
+Nothing in this repository simulates a Zephyr build.
+
+### 1. Install prerequisites
+
+- `west`, `cmake`, `ninja`, `python3`, `dtc` (`sudo apt install cmake ninja-build
+  device-tree-compiler python3-dev` + `pipx install west`)
+- the **Zephyr SDK** (`ZEPHYR_SDK_INSTALL_DIR`, includes `arm-zephyr-eabi-gcc`)
+
+### 2. Install Zephyr
+
+```bash
+west init ~/zephyrproject && cd ~/zephyrproject && west update
+```
+
+### 3. Configure the environment
+
+```bash
+export ZEPHYR_BASE=~/zephyrproject/zephyr
+export ZEPHYR_SDK_INSTALL_DIR=~/zephyr-sdk-0.16.5
+```
+
+### 4. Run the doctor (never falls back to a simulated build)
+
+```bash
+bun runner/index.ts doctor
+```
+
+```
+EmbedFactory Environment
+
+west             PASS   West version: v1.2.0
+cmake            PASS   cmake version 3.28.3
+ninja            PASS   ninja found
+python           PASS   Python 3.11.6
+dtc              PASS   devicetree compiler found
+ZEPHYR_BASE      PASS   /home/me/zephyrproject/zephyr (from ZEPHYR_BASE)
+Zephyr SDK       PASS   /home/me/zephyr-sdk-0.16.5 (0.16.5)
+arm-zephyr-eabi  PASS   arm-zephyr-eabi-gcc 12.2.0
+board            PASS   "nucleo_l476rg" recognised by west (312 boards)
+
+Environment      READY
+```
+
+```
+Environment      NOT_READY
+
+Missing:
+- west
+- ZEPHYR_BASE
+```
+
+### 5. Start the runner (web/desktop builds go through it)
+
+```bash
+bun runner/index.ts serve --port 8790 --token <secret>
+# then: BUILD_RUNNER_URL=http://127.0.0.1:8790, BUILD_RUNNER_TOKEN=<secret>
+```
+
+`GET /health` is a fast probe (filesystem lookups only); `GET /doctor` runs the
+full diagnostic.
+
+### 6. Create a project, then build it
+
+The reference, reproducible project lives in [`samples/zephyr-blink`](samples/zephyr-blink)
+(`CMakeLists.txt`, `prj.conf`, `src/main.c` — portable Zephyr APIs only, so it
+builds for whatever upstream board you pass).
+
+```bash
+bun runner/index.ts build --dir ~/zephyrproject/embedfactory-ref \
+  --rtos zephyr --board nucleo_l476rg --json
+```
+
+`west build` really runs, from the correct working directory, and the result
+tells the truth:
+
+```
+REAL · SUCCESS · exitCode=0
+command    west build -b nucleo_l476rg -d build -p auto
+artifacts  build/zephyr/zephyr.elf  123456 B  ELF  sha256:…  ARM
+memory     FLASH 41236 B / 256 KB · RAM 9536 B / 64 KB
+```
+
+### 7. Prove failure → repair → success end to end
+
+```bash
+bun runner/index.ts verify --board nucleo_l476rg
+```
+
+This builds the reference project with an intentional wrong Zephyr API, shows
+the **real** GCC/linker error, applies the corrective patch (through the
+configured LLM when `LLM_*` is set, otherwise deterministically), rebuilds, and
+validates the resulting `zephyr.elf` (size, sha256, format, ELF header) plus the
+FLASH/RAM usage and the ZIP export manifest — which carries the board profile:
+
+```json
+{
+  "rtos": "zephyr",
+  "board": "nucleo_l476rg",
+  "toolchain": "West version: v1.2.0",
+  "verification": "REAL · SUCCESS",
+  "verdict": "SUCCESS"
+}
+```
+
+If the Zephyr toolchain is not installed the command prints
+`SKIPPED — Zephyr toolchain unavailable` and exits non-zero. It never fabricates
+a build.
+
 ## Environment variables (server-side only)
 
 | Variable                       | Purpose                                                   |
@@ -77,8 +188,9 @@ are never sent to the browser.
 bun install
 bun convex dev --once      # push functions + regenerate types
 bun tsc -b --noEmit        # typecheck
-bun test                   # 59 tests: authz, patches, statuses, safety, runner, export
-bun runner/index.ts build --dir ./project --rtos zephyr --board nucleo_l476rg --json
+bun test                   # authz, patches, statuses, safety, runner, export, doctor
+bun runner/index.ts doctor                 # is this machine able to build firmware?
+bun runner/index.ts verify --board nucleo_l476rg   # real failure -> repair -> success
 ```
 
 ## Tests
@@ -88,3 +200,9 @@ unified-diff validation (`PATCH_FAILED`), LLM failure isolation, honest build
 statuses, the repair loop and limit, real process execution (real compiler,
 real exit codes, real artifacts), runner CLI contract, ZIP validity (verified
 with Python's `zipfile`), knowledge retrieval budget and the safety rules.
+
+The Zephyr-specific tests are **gated on the real toolchain**: they parse the
+ELF header from real bytes, parse a real linker memory report, and — when the
+environment is READY — run `west build` for a genuine
+failure → repair → success cycle. On a machine without Zephyr they report
+`SKIPPED — Zephyr toolchain unavailable` instead of a fake PASS.

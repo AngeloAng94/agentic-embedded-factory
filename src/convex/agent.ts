@@ -44,6 +44,22 @@ import {
 const ACTION_TIME_BUDGET_MS = 8 * 60 * 1000;
 const LLM_TIMEOUT_MS = 120_000;
 
+/**
+ * One-line evidence summary persisted with every build run. Flash/RAM usage
+ * comes from the real toolchain output, so it is recorded alongside the exit
+ * code and the artifacts instead of being recomputed later.
+ */
+function buildEvidenceSummary(result: BuildResult): string {
+  const parts = [`${result.verification} · ${result.verdict}`];
+  const flash = result.memory?.flashUsed ?? null;
+  const ram = result.memory?.ramUsed ?? null;
+  if (flash !== null || ram !== null) {
+    parts.push(`FLASH ${flash === null ? "n/a" : `${flash} B`} · RAM ${ram === null ? "n/a" : `${ram} B`}`);
+  }
+  if (result.artifacts.length > 0) parts.push(`${result.artifacts.length} artifact(s)`);
+  return parts.join(" · ");
+}
+
 function formatSafetyLog(
   report: ReturnType<typeof analyzeProject>,
 ): string {
@@ -383,7 +399,7 @@ ${appliedSummary}`;
         artifacts: dispatch.result.artifacts,
         reason: dispatch.result.reason ?? undefined,
         attempt,
-        summary: `${dispatch.result.verification} · ${dispatch.result.verdict}`,
+        summary: buildEvidenceSummary(dispatch.result),
         patchSummary: appliedSummary,
       });
       await ctx.runMutation(internal.agentStore.attachBuildToVersions, {
@@ -505,7 +521,7 @@ export const runBuild = action({
       artifacts: dispatch.result.artifacts,
       reason: dispatch.result.reason ?? undefined,
       attempt: 1,
-      summary: `${dispatch.result.verification} · ${dispatch.result.verdict}`,
+      summary: buildEvidenceSummary(dispatch.result),
     });
 
     await ctx.runMutation(internal.messages.insertInternal, {

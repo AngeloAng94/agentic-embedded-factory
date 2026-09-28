@@ -52,6 +52,12 @@ export function toBuildResult(evidence: LastBuildEvidence): BuildResult | null {
     stdout: evidence.stdout,
     stderr: evidence.stderr,
     artifacts: evidence.artifacts,
+    // Artifact bytes and memory usage are re-validated by the runner on each
+    // build; a row restored from the database carries the paths only.
+    artifactDetails: [],
+    memory: null,
+    rtos: null,
+    board: null,
     reason: evidence.reason,
     attempt: evidence.attempt,
   };

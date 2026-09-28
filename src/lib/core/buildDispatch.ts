@@ -11,7 +11,14 @@
  * process is downgraded to UNKNOWN by `normalizeRunnerResult`.
  */
 
-import type { BuildResult, Verdict, Verification } from "./types";
+import type {
+  ArtifactFormat,
+  ArtifactInfo,
+  BuildResult,
+  MemoryUsage,
+  Verdict,
+  Verification,
+} from "./types";
 import { emptyBuildResult } from "./types";
 
 export interface RunnerConfig {
@@ -54,6 +61,76 @@ export function resolveRunnerConfig(env: Record<string, string | undefined>): Ru
   };
 }
 
+const ARTIFACT_FORMATS = ["elf", "bin", "hex", "uf2", "map", "text", "other"];
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeArtifactDetails(raw: unknown): ArtifactInfo[] {
+  if (!Array.isArray(raw)) return [];
+  const infos: ArtifactInfo[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.path !== "string" || typeof record.sha256 !== "string") continue;
+    const format = ARTIFACT_FORMATS.includes(String(record.format))
+      ? (String(record.format) as ArtifactFormat)
+      : "other";
+    const elfRecord =
+      typeof record.elf === "object" && record.elf !== null
+        ? (record.elf as Record<string, unknown>)
+        : null;
+    const str = (value: unknown) => (typeof value === "string" ? value : null);
+    infos.push({
+      path: record.path,
+      bytes: asNumber(record.bytes) ?? 0,
+      sha256: record.sha256,
+      format,
+      elf: elfRecord
+        ? {
+            class: str(elfRecord.class),
+            endianness: str(elfRecord.endianness),
+            type: str(elfRecord.type),
+            machine: str(elfRecord.machine),
+            entry: str(elfRecord.entry),
+            architecture: str(elfRecord.architecture),
+          }
+        : null,
+    });
+  }
+  return infos;
+}
+
+function normalizeMemory(raw: unknown): MemoryUsage | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  const sectionsRecord =
+    typeof record.sections === "object" && record.sections !== null
+      ? (record.sections as Record<string, unknown>)
+      : null;
+  const memory: MemoryUsage = {
+    flashUsed: asNumber(record.flashUsed),
+    flashTotal: asNumber(record.flashTotal),
+    ramUsed: asNumber(record.ramUsed),
+    ramTotal: asNumber(record.ramTotal),
+    sections: sectionsRecord
+      ? {
+          text: asNumber(sectionsRecord.text) ?? 0,
+          data: asNumber(sectionsRecord.data) ?? 0,
+          bss: asNumber(sectionsRecord.bss) ?? 0,
+        }
+      : null,
+    report: typeof record.report === "string" ? record.report : null,
+  };
+  const empty =
+    memory.flashUsed === null &&
+    memory.ramUsed === null &&
+    memory.sections === null &&
+    memory.report === null;
+  return empty ? null : memory;
+}
+
 export function normalizeRunnerResult(raw: unknown, attempt = 1): BuildResult | null {
   if (typeof raw !== "object" || raw === null) return null;
   const record = raw as Record<string, unknown>;
@@ -86,6 +163,10 @@ export function normalizeRunnerResult(raw: unknown, attempt = 1): BuildResult | 
     artifacts: Array.isArray(record.artifacts)
       ? record.artifacts.filter((value): value is string => typeof value === "string")
       : [],
+    artifactDetails: normalizeArtifactDetails(record.artifactDetails),
+    memory: normalizeMemory(record.memory),
+    rtos: typeof record.rtos === "string" ? record.rtos : null,
+    board: typeof record.board === "string" ? record.board : null,
     reason: typeof record.reason === "string" ? record.reason : null,
     attempt,
   };

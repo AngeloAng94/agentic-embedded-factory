@@ -20,6 +20,15 @@ If no runner is configured, the web reports the build as
 ## CLI
 
 ```bash
+# is this machine able to build firmware? (west, cmake, ninja, python, dtc,
+# ZEPHYR_BASE, Zephyr SDK, arm-zephyr-eabi, and whether the board is recognised)
+bun runner/index.ts doctor
+bun runner/index.ts doctor --board native_sim --json
+
+# real end-to-end proof: reference project builds with an intentional defect,
+# the real compiler error is shown, the patch is applied, the rebuild succeeds
+bun runner/index.ts verify --board nucleo_l476rg
+
 # build the current project directory with the real toolchain
 bun runner/index.ts build --dir ./my-project --rtos zephyr --board nucleo_l476rg
 
@@ -46,7 +55,8 @@ Endpoints:
 
 | Method | Path       | Purpose                                          |
 | ------ | ---------- | ------------------------------------------------ |
-| GET    | `/health`  | which tools are available (`west`, `cmake`, …)   |
+| GET    | `/health`  | fast probe: which tools are in PATH (`west`, …)  |
+| GET    | `/doctor`  | full environment report (READY / NOT_READY)      |
 | POST   | `/build`   | real build of the posted files                   |
 | POST   | `/git`     | `git init` + `add` + `commit` on the posted files |
 | POST   | `/export`  | write the export tree to `outDir`                |
@@ -70,14 +80,37 @@ BUILD_RUNNER_TOKEN=<the same secret>
   "durationMs": 18400,
   "stdout": "...",
   "stderr": "...",
-  "artifacts": ["build/zephyr/zephyr.elf"],
+  "rtos": "zephyr",
+  "board": "nucleo_l476rg",
   "toolchain": "West version: v1.2.0",
+  "artifacts": ["build/zephyr/zephyr.elf", "build/zephyr/zephyr.bin"],
+  "artifactDetails": [
+    {
+      "path": "build/zephyr/zephyr.elf",
+      "bytes": 123456,
+      "sha256": "6f1c…",
+      "format": "elf",
+      "elf": { "class": "ELF32", "endianness": "little", "type": "EXEC", "machine": "ARM (e_machine=40)", "entry": "0x8000…", "architecture": "ARM" }
+    }
+  ],
+  "memory": {
+    "flashUsed": 41236,
+    "flashTotal": 262144,
+    "ramUsed": 9536,
+    "ramTotal": 65536,
+    "sections": { "text": 40000, "data": 1236, "bss": 8300 },
+    "report": "           FLASH:       41236 B       256 KB     15.73%"
+  },
   "reason": null
 }
 ```
 
 - `verification`: `REAL` (a process ran) · `SIMULATED` · `NOT_AVAILABLE`
 - `verdict`: `SUCCESS` · `FAILURE` · `UNKNOWN`
+- `artifactDetails` is byte-level evidence: the file was read from disk, so
+  the size, the sha256, the detected format and the ELF header are real.
+- `memory` is FLASH/RAM usage parsed from the toolchain's own output (the
+  Zephyr linker report, or the binutils `size` tool).
 
 A missing binary produces `NOT_AVAILABLE` with
 `reason: toolchain unavailable: "west" is not installed or not in PATH`.

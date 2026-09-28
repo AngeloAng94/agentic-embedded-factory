@@ -3,6 +3,8 @@
  * EmbedFactory local runner — the only component that executes native
  * toolchains.
  *
+ *   bun runner/index.ts doctor  [--board b] [--json]
+ *   bun runner/index.ts verify  [--board b] [--keep] [--json]
  *   bun runner/index.ts build   --dir <projectDir> [--rtos zephyr] [--board b] [--command "west build ..."] [--json]
  *   bun runner/index.ts build   --files <files.json> [--json]
  *   bun runner/index.ts git     --dir <projectDir> [--message "..."] [--json]
@@ -28,7 +30,9 @@ import { analyzeProject } from "../src/lib/core/safety";
 import { isPathAllowed } from "../src/lib/core/pathSafety";
 import { buildExportEntries } from "../src/lib/core/projectExport";
 import { detectRtos } from "../src/lib/core/rtos";
+import { formatDoctorReport, runDoctor } from "../src/lib/core/toolchainDoctor";
 import { runAgentTurn, type TurnFile, type TurnWrite } from "./lib/turn";
+import { formatVerifyReport, runZephyrVerification } from "./lib/verify";
 
 interface RunnerFile {
   path: string;
@@ -166,7 +170,7 @@ async function serve(flags: Record<string, string>): Promise<void> {
   const workRoot = flags.workdir ? path.resolve(flags.workdir) : null;
   if (workRoot) mkdirSync(workRoot, { recursive: true });
 
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     const respond = (status: number, payload: unknown) => {
       const body = JSON.stringify(payload);
       res.writeHead(status, {
@@ -176,6 +180,7 @@ async function serve(flags: Record<string, string>): Promise<void> {
       res.end(body);
     };
 
+    // Fast reachability probe: only filesystem lookups, no process is spawned.
     if (req.method === "GET" && req.url === "/health") {
       respond(200, {
         ok: true,
@@ -184,10 +189,23 @@ async function serve(flags: Record<string, string>): Promise<void> {
           west: Boolean(resolveExecutable("west")),
           cmake: Boolean(resolveExecutable("cmake")),
           make: Boolean(resolveExecutable("make")),
+          ninja: Boolean(resolveExecutable("ninja")),
+          python:
+            Boolean(resolveExecutable("python3")) || Boolean(resolveExecutable("python")),
+          dtc: Boolean(resolveExecutable("dtc")),
+          arm_zephyr_eabi: Boolean(resolveExecutable("arm-zephyr-eabi-gcc")),
           cc: Boolean(resolveExecutable("cc")) || Boolean(resolveExecutable("gcc")),
           git: Boolean(resolveExecutable("git")),
         },
+        zephyr_base: process.env.ZEPHYR_BASE ?? null,
       });
+      return;
+    }
+
+    // Full environment diagnostic (spawns `west`/`cmake`/`python` to get versions).
+    if (req.method === "GET" && req.url?.startsWith("/doctor")) {
+      const report = await runDoctor(process.env);
+      respond(report.ready ? 200 : 503, report);
       return;
     }
 
@@ -437,6 +455,25 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "doctor": {
+      const report = await runDoctor(process.env, { board: flags.board });
+      emit(report, json, [formatDoctorReport(report)]);
+      process.exitCode = report.ready ? 0 : 1;
+      return;
+    }
+
+    case "verify": {
+      const report = await runZephyrVerification({
+        board: flags.board,
+        keep: flags.keep === "true",
+        repoRoot: path.resolve(import.meta.dir, ".."),
+        timeoutMs: flags.timeout ? Number(flags.timeout) : undefined,
+      });
+      emit(report, json, [formatVerifyReport(report)]);
+      process.exitCode = report.ok ? 0 : 1;
+      return;
+    }
+
     case "serve":
       await serve(flags);
       return;
@@ -446,6 +483,8 @@ async function main(): Promise<void> {
         [
           "EmbedFactory runner",
           "",
+          "  doctor  [--board <b>] [--json]                              real environment diagnostic",
+          "  verify  [--board <b>] [--keep] [--json]                     real Zephyr failure -> repair -> success",
           "  build   --dir <dir> | --files <files.json> [--rtos zephyr|freertos] [--board <b>] [--command \"...\"] [--json]",
           "  turn    --files <files.json> --request \"...\" [--knowledge <kb.json>] [--build] [--json]",
           "  git     --dir <dir> | --files <files.json> [--message \"...\"] [--json]",
@@ -454,6 +493,7 @@ async function main(): Promise<void> {
           "  serve   [--port 8790] [--token <secret>]",
           "",
           "A build is only reported as SUCCESS when a real process exits 0.",
+          "When the Zephyr toolchain is missing, doctor says NOT_READY and verify reports SKIPPED.",
           "",
         ].join("\n"),
       );
