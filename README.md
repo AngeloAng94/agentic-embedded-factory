@@ -3,11 +3,14 @@
 Agentic workspace that turns a firmware requirement into a versioned project
 skeleton, validated patches and **real** build evidence for Zephyr / FreeRTOS.
 
-**Visual map** — how the system works, inputs and outputs:
-[`docs/infographic.png`](docs/infographic.png) (preview) ·
-[`docs/infographic.pdf`](docs/infographic.pdf) (single-page poster) ·
-[`docs/infographic-a4.pdf`](docs/infographic-a4.pdf) (A4 landscape, for printing).
-Regenerate them with `bun docs/render-infographic.ts`.
+**Workflow diagram** — one glance: who does what, where the loop starts, what
+comes out: [`docs/workflow.png`](docs/workflow.png) (preview) ·
+[`docs/workflow.pdf`](docs/workflow.pdf) (single A3 page, vector).
+Regenerate with `bun docs/render-workflow.ts`.
+
+**System map** — the longer written overview (pipeline, control plane, states):
+[`docs/infographic.pdf`](docs/infographic.pdf) · [`docs/infographic-a4.pdf`](docs/infographic-a4.pdf).
+Regenerate with `bun docs/render-infographic.ts`.
 
 ## The honesty rule
 
