@@ -539,13 +539,16 @@
     .arch .node:not(:last-child)::after{ content:"↓"; right:50%; top:auto; bottom:-11px; transform:translateX(50%); }
     body{ padding:20px 14px 40px; }
   }
+  /* Printed as A4 landscape: the page is wider than the 980px breakpoint, so
+     the poster keeps its desktop grid instead of collapsing into one column. */
   @media print{
-    @page{ size:A4 portrait; margin:10mm; }
-    html{ zoom:.58; }
     body{ padding:0; background:#08090a; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
     .sheet{ max-width:none; }
-    section{ break-inside:avoid; }
-    .step, .card, .panel, .cp{ break-inside:avoid; }
+    .masthead, .section-head{ break-inside:avoid; break-after:avoid; }
+    .step, .card, .panel, .cp, .srow, .node, .arch-note{ break-inside:avoid; }
+    .step h4, .panel .head{ break-after:avoid; }
+    table.matrix, .foot{ break-inside:avoid; }
+    section{ break-inside:auto; }
   }
 </style>
 </head>
