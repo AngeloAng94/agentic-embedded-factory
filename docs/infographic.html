@@ -1,0 +1,1022 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EmbedFactory — mappa del sistema</title>
+<style>
+  :root{
+    --bg:#08090a;
+    --panel:#0f1012;
+    --panel-2:#14161a;
+    --line:#26282d;
+    --line-soft:#1c1e22;
+    --ink:#f4f4f5;
+    --muted:#9b9ba4;
+    --dim:#6c6d76;
+    --ok:#6ee7a8;
+    --warn:#f5c451;
+    --bad:#f87171;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background:
+      radial-gradient(900px 420px at 18% -12%, rgba(255,255,255,.055), transparent 70%),
+      radial-gradient(700px 380px at 92% 4%, rgba(110,231,168,.05), transparent 70%),
+      var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;
+    padding:40px 24px 64px;
+  }
+  .sheet{
+    width:100%;
+    max-width:1180px;
+    margin:0 auto;
+  }
+
+  /* ---------- header ---------- */
+  .masthead{
+    position:relative;
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:34px 36px 30px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.028), transparent 60%),
+      var(--panel);
+    overflow:hidden;
+  }
+  .masthead::before{
+    content:"";
+    position:absolute; inset:0;
+    background-image:
+      linear-gradient(to right, rgba(255,255,255,.045) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,.045) 1px, transparent 1px);
+    background-size:32px 32px;
+    mask-image:radial-gradient(600px 220px at 78% 0%, #000 0%, transparent 78%);
+    pointer-events:none;
+  }
+  .kicker{
+    position:relative;
+    font-family:var(--mono);
+    font-size:10.5px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:var(--dim);
+  }
+  h1{
+    position:relative;
+    font-size:clamp(30px, 4.6vw, 52px);
+    line-height:1.04;
+    letter-spacing:-.03em;
+    margin:16px 0 14px;
+    font-weight:650;
+  }
+  h1 em{ font-style:normal; color:var(--ok); }
+  .lede{
+    position:relative;
+    max-width:760px;
+    margin:0;
+    font-size:15.5px;
+    line-height:1.6;
+    color:var(--muted);
+  }
+  .badges{
+    position:relative;
+    display:flex; flex-wrap:wrap; gap:8px;
+    margin-top:24px;
+  }
+  .badge{
+    font-family:var(--mono);
+    font-size:10px;
+    letter-spacing:.13em;
+    text-transform:uppercase;
+    color:var(--muted);
+    border:1px solid var(--line);
+    background:var(--panel-2);
+    border-radius:999px;
+    padding:6px 11px;
+  }
+  .badge.on{ color:var(--ok); border-color:rgba(110,231,168,.35); }
+  .badge.warn{ color:var(--warn); border-color:rgba(245,196,81,.32); }
+
+  /* ---------- sections ---------- */
+  section{ margin-top:34px; }
+  .section-head{
+    display:flex; align-items:baseline; gap:14px;
+    padding-bottom:12px;
+    margin-bottom:20px;
+    border-bottom:1px solid var(--line-soft);
+  }
+  .section-head .num{
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--dim);
+    letter-spacing:.16em;
+  }
+  h2{
+    font-size:19px;
+    letter-spacing:-.01em;
+    margin:0;
+    font-weight:600;
+  }
+  .section-head .note{
+    margin-left:auto;
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--dim);
+    letter-spacing:.1em;
+    text-transform:uppercase;
+  }
+
+  /* ---------- problem cards ---------- */
+  .grid-4{
+    display:grid;
+    grid-template-columns:repeat(4, minmax(0,1fr));
+    gap:12px;
+  }
+  .card{
+    border:1px solid var(--line);
+    border-radius:10px;
+    background:var(--panel);
+    padding:16px 16px 15px;
+  }
+  .card .tag{
+    font-family:var(--mono);
+    font-size:9.5px;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    color:var(--dim);
+    display:block;
+    margin-bottom:10px;
+  }
+  .card h3{
+    font-size:13.5px;
+    line-height:1.35;
+    margin:0 0 8px;
+    font-weight:600;
+  }
+  .card p{
+    margin:0;
+    font-size:12.5px;
+    line-height:1.55;
+    color:var(--muted);
+  }
+  .card .fix{
+    display:block;
+    margin-top:11px;
+    padding-top:10px;
+    border-top:1px dashed var(--line);
+    font-size:12px;
+    line-height:1.5;
+    color:var(--ink);
+  }
+  .card .fix b{ color:var(--ok); font-weight:600; }
+
+  /* ---------- pipeline ---------- */
+  .pipeline{
+    border:1px solid var(--line);
+    border-radius:12px;
+    background:linear-gradient(180deg, rgba(255,255,255,.018), transparent 30%), var(--panel);
+    padding:8px 22px 14px;
+  }
+  .step{
+    display:grid;
+    grid-template-columns:56px minmax(0,1fr) 300px;
+    gap:18px;
+    padding:16px 0;
+  }
+  .step + .step{ border-top:1px solid var(--line-soft); }
+  .rail{ position:relative; display:flex; justify-content:center; padding-top:2px; }
+  .rail .dot{
+    width:30px; height:30px;
+    flex:0 0 30px;
+    border-radius:9px;
+    border:1px solid var(--line);
+    background:var(--panel-2);
+    display:grid; place-items:center;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--muted);
+  }
+  .step.hot .rail .dot{ color:#0a0a0b; background:var(--ok); border-color:var(--ok); font-weight:700; }
+  .step.fail .rail .dot{ color:#0a0a0b; background:var(--warn); border-color:var(--warn); font-weight:700; }
+  .step h4{
+    margin:2px 0 6px;
+    font-size:14px;
+    letter-spacing:.01em;
+    font-weight:600;
+    display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+  }
+  .step h4 code{
+    font-family:var(--mono);
+    font-size:10px;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:var(--dim);
+    border:1px solid var(--line);
+    border-radius:999px;
+    padding:2px 7px;
+    font-weight:400;
+  }
+  .step p{
+    margin:0;
+    font-size:12.8px;
+    line-height:1.6;
+    color:var(--muted);
+    max-width:62ch;
+  }
+  .step p code, .mono-inline{
+    font-family:var(--mono);
+    font-size:11.6px;
+    color:#d6d6dc;
+    background:rgba(255,255,255,.045);
+    border-radius:4px;
+    padding:1px 4px;
+  }
+  .io{
+    font-family:var(--mono);
+    font-size:11px;
+    line-height:1.5;
+    color:var(--dim);
+    border-left:1px solid var(--line-soft);
+    padding-left:14px;
+    align-self:start;
+  }
+  .io .row{ display:grid; grid-template-columns:26px 1fr; gap:8px; }
+  .io .row + .row{ margin-top:6px; }
+  .io .lbl{ color:var(--dim); letter-spacing:.1em; }
+  .io .val{ color:#c9c9d1; }
+  .io .val.ok{ color:var(--ok); }
+  .io .val.warn{ color:var(--warn); }
+
+  /* ---------- in / out ---------- */
+  .duo{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:14px;
+  }
+  .panel{
+    border:1px solid var(--line);
+    border-radius:12px;
+    background:var(--panel);
+    padding:20px 22px;
+  }
+  .panel .head{
+    display:flex; align-items:center; gap:10px;
+    margin-bottom:16px;
+  }
+  .panel .head .mark{
+    font-family:var(--mono);
+    font-size:10px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    color:var(--dim);
+  }
+  .panel .head .mark.ok{ color:var(--ok); }
+  .panel .head h3{ margin:0; font-size:13.5px; font-weight:600; }
+  .entry{ padding:11px 0; border-top:1px solid var(--line-soft); }
+  .entry:first-of-type{ border-top:0; padding-top:0; }
+  .entry .k{
+    font-family:var(--mono);
+    font-size:10.5px;
+    letter-spacing:.09em;
+    color:#e4e4e9;
+    text-transform:uppercase;
+  }
+  .entry .v{
+    margin-top:4px;
+    font-size:12.4px;
+    line-height:1.55;
+    color:var(--muted);
+  }
+  .entry .ex{
+    margin-top:5px;
+    font-family:var(--mono);
+    font-size:11px;
+    color:var(--dim);
+  }
+  .entry .ex b{ color:#c9c9d1; font-weight:400; }
+
+  /* ---------- control plane ---------- */
+  .cp-grid{
+    display:grid;
+    grid-template-columns:repeat(3, minmax(0,1fr));
+    gap:12px;
+  }
+  .cp{
+    border:1px solid var(--line);
+    border-radius:12px;
+    background:var(--panel);
+    padding:18px 18px 18px;
+  }
+  .cp .role{
+    font-family:var(--mono);
+    font-size:9.5px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    color:var(--dim);
+  }
+  .cp h3{ margin:8px 0 12px; font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  .cp ul{ margin:0; padding:0; list-style:none; }
+  .cp li{
+    position:relative;
+    padding:7px 0 7px 15px;
+    font-size:12.4px;
+    line-height:1.55;
+    color:var(--muted);
+    border-top:1px solid var(--line-soft);
+  }
+  .cp li:first-child{ border-top:0; }
+  .cp li::before{
+    content:"";
+    position:absolute; left:0; top:14px;
+    width:5px; height:5px;
+    border-radius:50%;
+    background:var(--dim);
+  }
+  .cp li b{ color:#e7e7ec; font-weight:600; }
+  .cp .path{
+    margin-top:14px;
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--dim);
+  }
+
+  .status-table{
+    margin-top:12px;
+    border:1px solid var(--line);
+    border-radius:12px;
+    overflow:hidden;
+    background:var(--panel);
+  }
+  .srow{
+    display:grid;
+    grid-template-columns:150px 1fr;
+    gap:18px;
+    padding:11px 18px;
+    border-top:1px solid var(--line-soft);
+    align-items:baseline;
+  }
+  .srow:first-child{ border-top:0; background:var(--panel-2); }
+  .srow .name{
+    font-family:var(--mono);
+    font-size:10.5px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--dim);
+  }
+  .srow .states{
+    font-size:12.3px;
+    line-height:1.5;
+    color:var(--muted);
+  }
+  .srow .states i{ font-style:normal; color:#e7e7ec; }
+  .dot-ok, .dot-off, .dot-bad, .dot-warn{
+    display:inline-block; width:6px; height:6px; border-radius:50%;
+    margin-right:5px; vertical-align:1px;
+  }
+  .dot-ok{ background:var(--ok); box-shadow:0 0 0 3px rgba(110,231,168,.13); }
+  .dot-off{ background:#4b4c55; }
+  .dot-bad{ background:var(--bad); box-shadow:0 0 0 3px rgba(248,113,113,.12); }
+  .dot-warn{ background:var(--warn); box-shadow:0 0 0 3px rgba(245,196,81,.12); }
+
+  /* ---------- honesty ---------- */
+  .honesty{
+    display:grid;
+    grid-template-columns:1.15fr .85fr;
+    gap:14px;
+  }
+  table.matrix{
+    width:100%;
+    border-collapse:collapse;
+    font-size:12.2px;
+  }
+  table.matrix th{
+    text-align:left;
+    font-family:var(--mono);
+    font-size:9.5px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--dim);
+    font-weight:400;
+    padding:0 10px 9px 0;
+    border-bottom:1px solid var(--line);
+  }
+  table.matrix td{
+    padding:10px 10px 10px 0;
+    border-bottom:1px solid var(--line-soft);
+    vertical-align:top;
+    color:var(--muted);
+  }
+  table.matrix td:first-child{ font-family:var(--mono); font-size:10.5px; letter-spacing:.06em; color:#e4e4e9; }
+  table.matrix tr:last-child td{ border-bottom:0; }
+  .verdict{ font-family:var(--mono); font-size:10.5px; letter-spacing:.06em; }
+  .v-ok{ color:var(--ok); }
+  .v-bad{ color:var(--bad); }
+  .v-unk{ color:var(--warn); }
+  .rules{ margin:0; padding:0; list-style:none; }
+  .rules li{
+    position:relative;
+    padding:0 0 12px 18px;
+    font-size:12.3px;
+    line-height:1.55;
+    color:var(--muted);
+  }
+  .rules li:last-child{ padding-bottom:0; }
+  .rules li::before{
+    content:"";
+    position:absolute; left:0; top:7px;
+    width:7px; height:1px;
+    background:var(--dim);
+  }
+  .rules b{ color:#e7e7ec; font-weight:600; }
+  .rules .quote{
+    display:block;
+    margin-top:10px;
+    padding:12px 14px;
+    border-left:2px solid var(--ok);
+    background:rgba(110,231,168,.05);
+    font-size:12.6px;
+    color:#e9e9ee;
+  }
+
+  /* ---------- architecture ---------- */
+  .arch{
+    display:grid;
+    grid-template-columns:repeat(4, minmax(0,1fr));
+    gap:10px;
+    align-items:stretch;
+  }
+  .arch .node{
+    position:relative;
+    border:1px solid var(--line);
+    border-radius:10px;
+    background:var(--panel);
+    padding:15px 15px 14px;
+  }
+  .arch .node:not(:last-child)::after{
+    content:"→";
+    position:absolute;
+    right:-9px; top:50%;
+    transform:translateY(-50%);
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--dim);
+    background:var(--bg);
+    padding:0 2px;
+    z-index:2;
+  }
+  .arch .node .n{
+    font-family:var(--mono);
+    font-size:9.5px;
+    letter-spacing:.17em;
+    text-transform:uppercase;
+    color:var(--dim);
+  }
+  .arch .node h4{ margin:8px 0 7px; font-size:12.8px; font-weight:600; }
+  .arch .node p{ margin:0; font-size:11.8px; line-height:1.5; color:var(--muted); }
+  .arch .node code{
+    font-family:var(--mono);
+    font-size:10.8px;
+    color:#cfcfd6;
+  }
+  .arch-note{
+    margin-top:12px;
+    border:1px dashed var(--line);
+    border-radius:10px;
+    padding:12px 15px;
+    font-size:12.2px;
+    line-height:1.55;
+    color:var(--muted);
+    background:rgba(255,255,255,.014);
+  }
+  .arch-note b{ color:var(--ink); font-weight:600; }
+
+  /* ---------- footer ---------- */
+  .foot{
+    margin-top:34px;
+    border-top:1px solid var(--line-soft);
+    padding-top:18px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:14px 26px;
+    align-items:flex-start;
+    justify-content:space-between;
+  }
+  .foot .cmds{
+    font-family:var(--mono);
+    font-size:11px;
+    line-height:1.9;
+    color:var(--dim);
+  }
+  .foot .cmds b{ color:#d5d5dc; font-weight:400; }
+  .foot .sig{
+    font-family:var(--mono);
+    font-size:9.5px;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    color:var(--dim);
+    text-align:right;
+    line-height:1.9;
+  }
+
+  @media (max-width: 980px){
+    .grid-4{ grid-template-columns:repeat(2, minmax(0,1fr)); }
+    .cp-grid{ grid-template-columns:1fr; }
+    .duo, .honesty{ grid-template-columns:1fr; }
+    .arch{ grid-template-columns:1fr 1fr; }
+    .arch .node:nth-child(2)::after{ display:none; }
+    .step{ grid-template-columns:44px minmax(0,1fr); }
+    .io{ grid-column:2; border-left:0; padding-left:0; border-top:1px dashed var(--line-soft); padding-top:9px; }
+  }
+  @media (max-width: 640px){
+    .grid-4{ grid-template-columns:1fr; }
+    .arch{ grid-template-columns:1fr; }
+    .arch .node:not(:last-child)::after{ content:"↓"; right:50%; top:auto; bottom:-11px; transform:translateX(50%); }
+    body{ padding:20px 14px 40px; }
+  }
+  @media print{
+    @page{ size:A4 portrait; margin:10mm; }
+    html{ zoom:.58; }
+    body{ padding:0; background:#08090a; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    .sheet{ max-width:none; }
+    section{ break-inside:avoid; }
+    .step, .card, .panel, .cp{ break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<main class="sheet">
+
+  <!-- ================= HEADER ================= -->
+  <header class="masthead">
+    <div class="kicker">EmbedFactory · mappa del sistema · control plane v1</div>
+    <h1>Dal requisito al <em>firmware verificato</em>.</h1>
+    <p class="lede">
+      Una software factory conversazionale per firmware embedded: scheletro deterministico → patch validate →
+      build reale → riparazione guidata dagli errori del compilatore → validazione dell'artefatto.
+      Zephyr è l'implementazione completa oggi; FreeRTOS è un modello di stato già previsto, senza finta prontezza.
+    </p>
+    <div class="badges">
+      <span class="badge on">verification · REAL / SIMULATED / NOT_AVAILABLE</span>
+      <span class="badge warn">verdict · SUCCESS / FAILURE / UNKNOWN</span>
+      <span class="badge">nessun READY senza evidenza</span>
+    </div>
+  </header>
+
+  <!-- ================= 01 PROBLEMA ================= -->
+  <section>
+    <div class="section-head">
+      <span class="num">01</span>
+      <h2>Cosa risolve</h2>
+      <span class="note">il problema è la fiducia, non la generazione</span>
+    </div>
+    <div class="grid-4">
+      <div class="card">
+        <span class="tag">problema</span>
+        <h3>Firmware “scritto bene” che non è mai stato compilato</h3>
+        <p>Un LLM può produrre codice plausibile e totalmente non compilabile: nessuno se ne accorge finché non tocca il toolchain.</p>
+        <span class="fix"><b>EmbedFactory:</b> ogni modifica passa da un build reale; l'output del compilatore è l'unica verità.</span>
+      </div>
+      <div class="card">
+        <span class="tag">problema</span>
+        <h3>Setup manuale di skeleton e board</h3>
+        <p>CMakeLists, prj.conf, main.c, board name: lavoro ripetitivo e fonte di errori silenziosi a ogni nuovo progetto.</p>
+        <span class="fix"><b>EmbedFactory:</b> skeleton deterministico, versionato, con board scelta solo tra quelle che il doctor ha davvero elencato.</span>
+      </div>
+      <div class="card">
+        <span class="tag">problema</span>
+        <h3>Nessuna traccia di chi ha cambiato cosa</h3>
+        <p>Patch applicate “a memoria”, stato del progetto indistinguibile tra “sembra pronto” e “è stato costruito”.</p>
+        <span class="fix"><b>EmbedFactory:</b> versioni immutabili con patch, autore, motivo e verdetto di build; ripristino di qualsiasi versione.</span>
+      </div>
+      <div class="card">
+        <span class="tag">problema</span>
+        <h3>Non si sa cosa manca per poter buildare</h3>
+        <p>Errori generici, toolchain assenti, runner spento: l'utente non sa se il problema è il codice o l'ambiente.</p>
+        <span class="fix"><b>EmbedFactory:</b> doctor reale + control plane che dice <i>cosa</i> non è pronto e <i>perché</i>.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 02 INPUT ================= -->
+  <section>
+    <div class="section-head">
+      <span class="num">02</span>
+      <h2>Input</h2>
+      <span class="note">tutto ciò che entra nel sistema</span>
+    </div>
+    <div class="duo">
+      <div class="panel">
+        <div class="head"><span class="mark">in</span><h3>Requisito e contesto</h3></div>
+        <div class="entry">
+          <div class="k">Requisito in linguaggio naturale</div>
+          <div class="v">Cosa deve fare il firmware, in italiano o inglese, anche in più turni conversazionali.</div>
+          <div class="ex">es. <b>“LED1 a 1 Hz su nucleo_l476rg, nessun delay bloccante nell'ISR”</b></div>
+        </div>
+        <div class="entry">
+          <div class="k">RTOS</div>
+          <div class="v">Zephyr (implementazione completa) o FreeRTOS (stato modellato, nessun doctor reale: <span class="mono-inline">NOT_CONFIGURED</span>).</div>
+        </div>
+        <div class="entry">
+          <div class="k">Board / MCU</div>
+          <div class="v">Identificatore validato. Diventa <span class="mono-inline">READY</span> solo se compare nella lista reale del doctor, altrimenti <span class="mono-inline">UNKNOWN / NOT VERIFIED</span>.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Vincoli e conoscenza</div>
+          <div class="v">Regole di sicurezza embedded (allocazione statica, ISR brevi, API FromISR) + frammenti di knowledge base con budget.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Configurazione server-side</div>
+          <div class="v">Provider e modello LLM, endpoint del build runner. I secret restano nel processo, mai nel browser.</div>
+          <div class="ex"><b>LLM_PROVIDER · LLM_BASE_URL · LLM_MODEL · LLM_API_KEY</b> · <b>BUILD_RUNNER_URL · BUILD_RUNNER_TOKEN</b></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="head"><span class="mark">contesto</span><h3>Cosa legge già dentro</h3></div>
+        <div class="entry">
+          <div class="k">File correnti del progetto</div>
+          <div class="v">Ogni turno riceve il contenuto attuale: il modello non lavora su una copia mentale.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Ultimo build reale</div>
+          <div class="v">Comando, exit code, stdout/stderr del compilatore e artefatti: è l'input della riparazione.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Patch precedenti</div>
+          <div class="v">Evita cicli che riapplicano la stessa correzione fallita.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Doctor dell'ambiente</div>
+          <div class="v">west, cmake, ninja, python, dtc, ZEPHYR_BASE, Zephyr SDK, arm-zephyr-eabi, board list. Nessuna inferenza.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Identità e proprietà</div>
+          <div class="v">Sessione Convex Auth: ogni query/mutation verifica la proprietà lato server. Nessun userId dal client.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 03 PIPELINE ================= -->
+  <section>
+    <div class="section-head">
+      <span class="num">03</span>
+      <h2>Come funziona — la pipeline</h2>
+      <span class="note">un turno, sette passaggi verificabili</span>
+    </div>
+
+    <div class="pipeline">
+
+      <div class="step">
+        <div class="rail"><div class="dot">01</div></div>
+        <div>
+          <h4>Skeleton <code>deterministico · nessun LLM</code></h4>
+          <p>
+            Il progetto nasce da template fissi: <code>CMakeLists.txt</code>, <code>prj.conf</code>,
+            <code>src/main.c</code>, <code>README.md</code>, <code>.gitignore</code>, con board e RTOS richiesti.
+            La prima versione è sempre ricostruibile e non dipende da un modello linguistico.
+          </p>
+        </div>
+        <div class="io">
+          <div class="row"><span class="lbl">IN →</span><span class="val">nome, rtos, board, requisito</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val">albero file + versione v1</span></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="rail"><div class="dot">02</div></div>
+        <div>
+          <h4>Contesto e prompt <code>server-side</code></h4>
+          <p>
+            Retrieval della knowledge base entro un budget, poi un prompt strutturato: progetto, RTOS, board, MCU,
+            file correnti, patch già applicate, ultimo build reale e richiesta utente.
+          </p>
+        </div>
+        <div class="io">
+          <div class="row"><span class="lbl">IN →</span><span class="val">requisito + stato progetto</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val">prompt completo (tracciato)</span></div>
+        </div>
+      </div>
+
+      <div class="step hot">
+        <div class="rail"><div class="dot">03</div></div>
+        <div>
+          <h4>Piano del modello <code>un solo oggetto JSON</code></h4>
+          <p>
+            Il modello non risponde a testo libero: restituisce <code>{ summary, creates, patches, requestBuild, answerOnly }</code>.
+            La risposta viene estratta e validata; se il provider è irraggiungibile il turno fallisce esplicitamente:
+            nessun file creato, nessun file modificato, nessun build avviato.
+          </p>
+        </div>
+        <div class="io">
+          <div class="row"><span class="lbl">IN →</span><span class="val">prompt</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val">piano di patch o answer-only</span></div>
+          <div class="row"><span class="lbl">ERR →</span><span class="val warn">LLM_BAD_RESPONSE · PLAN_EMPTY</span></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="rail"><div class="dot">04</div></div>
+        <div>
+          <h4>Validazione patch <code>tutto-o-niente</code></h4>
+          <p>
+            I file esistenti si modificano solo con unified diff a 3 righe di contesto: se il contesto non combacia
+            byte per byte l'intera operazione è rifiutata (<code>PATCH_FAILED</code>) e non viene scritto nulla.
+            I path sono confinati a <code>src/</code>, <code>include/</code>, <code>drivers/</code>,
+            <code>app/</code>, <code>tests/</code>, <code>boards/</code>, <code>scripts/</code> e ai file radice ammessi.
+          </p>
+        </div>
+        <div class="io">
+          <div class="row"><span class="lbl">IN →</span><span class="val">piano + contenuto corrente</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val">file aggiornati + versione immutabile</span></div>
+        </div>
+      </div>
+
+      <div class="step hot">
+        <div class="rail"><div class="dot">05</div></div>
+        <div>
+          <h4>Build reale <code>il runner è l'unico che compila</code></h4>
+          <p>
+            Dispatch HTTP al runner, che esegue davvero <code>west build -b &lt;board&gt; -d build -p auto</code> nella
+            working directory corretta. Torna exit code, comando, stdout/stderr, artefatti e memoria linker.
+            Convex non può lanciare processi: senza runner il risultato è <span class="mono-inline">NOT_AVAILABLE</span>, mai un build finto.
+          </p>
+        </div>
+        <div class="io">
+          <div class="row"><span class="lbl">IN →</span><span class="val">progetto + board + toolchain</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val ok">REAL · exit 0</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val warn">REAL · errore compilatore</span></div>
+        </div>
+      </div>
+
+      <div class="step fail">
+        <div class="rail"><div class="dot">06</div></div>
+        <div>
+          <h4>Ciclo di riparazione <code>max 3 tentativi</code></h4>
+          <p>
+            In caso di <span class="mono-inline">FAILURE</span> gli errori reali di GCC/linker rientrano nel prompt con
+            l'istruzione di correggere solo quei punti, non di riscrivere il file. Ogni tentativo è un build reale.
+            Alla fine: <span class="mono-inline">BUILD FAILED</span> o <span class="mono-inline">REPAIR LIMIT REACHED</span>, con la cronologia completa.
+          </p>
+        </div>
+        <div class="io">
+          <div class="row"><span class="lbl">IN →</span><span class="val">stderr + exit code del build</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val">patch correttiva → rebuild</span></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="rail"><div class="dot">07</div></div>
+        <div>
+          <h4>Validazione artefatto <code>l'evidenza</code></h4>
+          <p>
+            L'ELF viene ispezionato senza dipendenze esterne: magic number, header ELF32/64, endianness, architettura
+            (ARM, RISC-V, Xtensa, ARC), entry point, dimensione e SHA-256. La memoria FLASH/RAM arriva dal report del
+            linker. Il manifest di export porta con sé board, toolchain e verdetto.
+          </p>
+        </div>
+        <div class="io">
+          <div class="row"><span class="lbl">IN →</span><span class="val">zephyr.elf + report linker</span></div>
+          <div class="row"><span class="lbl">OUT →</span><span class="val ok">ELF ARM · sha256 · FLASH/RAM</span></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ================= 04 OUTPUT ================= -->
+  <section>
+    <div class="section-head">
+      <span class="num">04</span>
+      <h2>Output</h2>
+      <span class="note">cosa resta all'utente</span>
+    </div>
+    <div class="duo">
+      <div class="panel">
+        <div class="head"><span class="mark ok">out</span><h3>Artefatti del prodotto</h3></div>
+        <div class="entry">
+          <div class="k">Progetto firmware versionato</div>
+          <div class="v">File reali, più la storia <span class="mono-inline">v1…vn</span>: contenuto, autore, motivo, patch e verdetto di build. Ogni versione è ripristinabile.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Evidenza di build reale</div>
+          <div class="v">Comando, exit code, durata, stdout/stderr e artefatto ispezionato.</div>
+          <div class="ex">es. <b>zephyr.elf · ELF · ARM · sha256:… · FLASH 41 236 B / 256 KB · RAM 9 536 B / 64 KB</b><br><span style="color:#4b4c55">valori emessi dal runner su una macchina con toolchain</span></div>
+        </div>
+        <div class="entry">
+          <div class="k">Manifest + export ZIP</div>
+          <div class="v">ZIP costruito davvero nel browser (file + README + manifest) e inizializzazione Git opzionale.</div>
+          <div class="ex"><b>{ rtos, board, toolchain, verification, verdict }</b></div>
+        </div>
+        <div class="entry">
+          <div class="k">Stato onesto del progetto</div>
+          <div class="v"><span class="mono-inline">verified</span> solo dopo un build reale riuscito; altrimenti <span class="mono-inline">unverified</span>. Le righe del vecchio motore simulato restano <span class="mono-inline">LEGACY · UNVERIFIED</span>.</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="head"><span class="mark">non-out</span><h3>Quello che non produce (per scelta)</h3></div>
+        <div class="entry">
+          <div class="k">Nessun “deploy” o flash sulla board</div>
+          <div class="v">HIL, flashing e test su hardware non sono implementati: non esiste una UI che li simuli.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Nessun verdetto senza esecuzione</div>
+          <div class="v">Un runner che risponde “successo” con exit code diverso da 0 viene declassato a <span class="mono-inline">UNKNOWN</span>.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Nessuna importazione di firmware esistente</div>
+          <div class="v">L'entry point “Existing Firmware” è visibile ma disabilitato: <i>Coming soon</i>, nessuna schermata finta.</div>
+        </div>
+        <div class="entry">
+          <div class="k">Nessuna board “supportata” per decreto</div>
+          <div class="v">La lista board viene dal doctor. Se non è verificabile, la UI scrive <span class="mono-inline">UNKNOWN / NOT VERIFIED</span>.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 05 CONTROL PLANE ================= -->
+  <section>
+    <div class="section-head">
+      <span class="num">05</span>
+      <h2>Control plane</h2>
+      <span class="note">tre livelli, una sola fonte di verità</span>
+    </div>
+
+    <div class="cp-grid">
+      <div class="cp">
+        <div class="role">livello 1 · orientamento</div>
+        <h3>Dashboard</h3>
+        <ul>
+          <li><b>Welcome</b> + due ingressi: <b>New Firmware</b> e <b>Existing Firmware</b> (disabilitato).</li>
+          <li><b>System status</b> a colpo d'occhio: AI, build runner, Zephyr, FreeRTOS, toolchain.</li>
+          <li><b>First-run checklist</b> non bloccante: collega AI → verifica runner → toolchain Zephyr → FreeRTOS.</li>
+          <li>Ogni riga di stato apre il dettaglio in Environment.</li>
+        </ul>
+        <div class="path">/dashboard</div>
+      </div>
+      <div class="cp">
+        <div class="role">livello 2 · diagnosi</div>
+        <h3>Environment</h3>
+        <ul>
+          <li>AI: provider, modello, connessione, ultimo controllo reale.</li>
+          <li>Runner: URL, stato, latenza, tool riportati da <b>GET /health</b>.</li>
+          <li>Zephyr: tabella doctor (west, cmake, ninja, python, dtc, ZEPHYR_BASE, SDK, arm-zephyr-eabi, board) e output grezzo.</li>
+          <li>FreeRTOS: <b>Not configured</b> finché non esiste un doctor reale.</li>
+          <li><b>Run diagnostics</b> esegue davvero il doctor via runner.</li>
+        </ul>
+        <div class="path">/environment</div>
+      </div>
+      <div class="cp">
+        <div class="role">livello 3 · configurazione</div>
+        <h3>Settings</h3>
+        <ul>
+          <li>AI/LLM: sette variabili, più <b>Test connection</b> con una generazione reale.</li>
+          <li>Build runner: URL e token, più <b>Test runner</b> con <b>GET /health</b>.</li>
+          <li>Secret mostrati solo come <i>Configured</i> / <i>Not configured</i>.</li>
+          <li>General: modelli e limiti già esistenti, nessuna impostazione duplicata.</li>
+        </ul>
+        <div class="path">/settings</div>
+      </div>
+    </div>
+
+    <div class="status-table">
+      <div class="srow">
+        <span class="name">stato</span>
+        <span class="states">vocabolario unico usato da tutte le superfici</span>
+      </div>
+      <div class="srow">
+        <span class="name">AI</span>
+        <span class="states"><span class="dot-ok"></span><i>Connected</i> (risposta reale) · <span class="dot-off"></span><i>Not configured</i> · <span class="dot-bad"></span><i>Error</i> con messaggio del provider</span>
+      </div>
+      <div class="srow">
+        <span class="name">Build runner</span>
+        <span class="states"><span class="dot-ok"></span><i>Connected</i> · <span class="dot-off"></span><i>Not configured</i> · <span class="dot-warn"></span><i>Unavailable</i> · <span class="dot-bad"></span><i>Authentication failed</i> (401/403)</span>
+      </div>
+      <div class="srow">
+        <span class="name">Zephyr</span>
+        <span class="states"><span class="dot-ok"></span><i>Ready</i> solo se ogni check richiesto è PASS · <span class="dot-bad"></span><i>Not ready</i> con l'elenco dei mancanti · <span class="dot-warn"></span><i>Unknown</i> senza prove</span>
+      </div>
+      <div class="srow">
+        <span class="name">FreeRTOS</span>
+        <span class="states"><span class="dot-off"></span><i>Not configured</i> — nessun doctor reale, nessuna prontezza dichiarata</span>
+      </div>
+      <div class="srow">
+        <span class="name">Toolchain</span>
+        <span class="states"><span class="dot-ok"></span><i>Ready</i> · <span class="dot-bad"></span><i>Not ready</i> · <span class="dot-warn"></span><i>Unknown</i></span>
+      </div>
+      <div class="srow">
+        <span class="name">Board</span>
+        <span class="states"><span class="dot-ok"></span><i>Ready</i> se <code>west boards</code> l'ha elencata · <span class="dot-warn"></span><i>UNKNOWN / NOT VERIFIED</i> altrimenti</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 06 HONESTY ================= -->
+  <section>
+    <div class="section-head">
+      <span class="num">06</span>
+      <h2>La regola di onestà</h2>
+      <span class="note">due campi, nessuna eccezione</span>
+    </div>
+    <div class="honesty">
+      <div class="panel">
+        <table class="matrix">
+          <thead>
+            <tr><th>verification</th><th>exit code</th><th>verdict</th><th>cosa vede l'utente</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>REAL</td><td>0</td><td class="verdict v-ok">SUCCESS</td>
+              <td>Build eseguito, artefatto validato, progetto <i>verified</i>.</td>
+            </tr>
+            <tr>
+              <td>REAL</td><td>≠ 0</td><td class="verdict v-bad">FAILURE</td>
+              <td>Errori del compilatore reali + tentativi di riparazione.</td>
+            </tr>
+            <tr>
+              <td>SIMULATED</td><td>—</td><td class="verdict v-unk">UNKNOWN</td>
+              <td>Eredità del motore rimosso: <i>LEGACY · UNVERIFIED</i>.</td>
+            </tr>
+            <tr>
+              <td>NOT_AVAILABLE</td><td>—</td><td class="verdict v-unk">UNKNOWN</td>
+              <td><i>reason: toolchain unavailable — “west” is not installed or not in PATH</i></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <ul class="rules">
+          <li><b>SUCCESS</b> esiste solo con <span class="mono-inline">REAL</span> e <span class="mono-inline">exitCode = 0</span>.</li>
+          <li>Un progetto diventa <b>verified</b> solo dopo un build reale riuscito.</li>
+          <li>Un probe memorizzato viene <b>invalidato</b> appena cambia la configurazione che ha misurato.</li>
+          <li>Secret: <b>Configured / Not configured</b>. Mai in chiaro, mai in una risposta API, mai in un log, mai in <span class="mono-inline">localStorage</span>.</li>
+          <li>Se manca un pezzo, la UI dice <b>cosa</b> e <b>perché</b>; non riempie il vuoto con un badge verde.</li>
+          <li class="quote">“Dimmi cosa è pronto, cosa non lo è, e perché.”</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 07 ARCHITETTURA ================= -->
+  <section>
+    <div class="section-head">
+      <span class="num">07</span>
+      <h2>Architettura</h2>
+      <span class="note">chi può eseguire cosa</span>
+    </div>
+    <div class="arch">
+      <div class="node">
+        <div class="n">client</div>
+        <h4>Web · React 19 + Vite</h4>
+        <p>Legge solo stato normalizzato. Nessun secret, nessun toolchain, nessun build.</p>
+      </div>
+      <div class="node">
+        <div class="n">backend</div>
+        <h4>Convex · auth + dati</h4>
+        <p>Query/mutation con proprietà verificata, azioni node per LLM e dispatch. <code>process.env</code> qui.</p>
+      </div>
+      <div class="node">
+        <div class="n">esecuzione</div>
+        <h4>Runner · Bun HTTP</h4>
+        <p>Unico componente che esegue <code>west</code>, <code>cmake</code>, <code>ninja</code>, <code>dtc</code>. Endpoint: health, doctor, build, git, analyze, export.</p>
+      </div>
+      <div class="node">
+        <div class="n">verità</div>
+        <h4>Toolchain nativa</h4>
+        <p>Zephyr SDK, <code>arm-zephyr-eabi</code>, board di <code>west boards</code>. L'unica fonte di un SUCCESS.</p>
+      </div>
+    </div>
+    <div class="arch-note">
+      <b>Perché il runner esiste:</b> un runtime serverless non può avviare processi nativi. Invece di simulare un build,
+      il sistema sposta l'esecuzione dove il toolchain vive davvero e degrada in modo esplicito:
+      senza runner → <span class="mono-inline">NOT_AVAILABLE</span>; senza doctor → <span class="mono-inline">UNKNOWN</span>;
+      il progetto esportato resta comunque buildabile in locale.
+    </div>
+  </section>
+
+  <!-- ================= FOOTER ================= -->
+  <footer class="foot">
+    <div class="cmds">
+      <b>bun runner/index.ts doctor</b> — questa macchina può buildare firmware?<br>
+      <b>bun runner/index.ts verify --board nucleo_l476rg</b> — fallimento → riparazione → successo, reale<br>
+      <b>bun runner/index.ts serve --port 8790</b> — il runner che alimenta la web app<br>
+      <b>bun test</b> · <b>bunx tsc -b --noEmit</b> · <b>bunx convex dev --once</b>
+    </div>
+    <div class="sig">
+      EmbedFactory<br>
+      requirement → verified firmware<br>
+      nessun READY senza evidenza
+    </div>
+  </footer>
+
+</main>
+</body>
+</html>
