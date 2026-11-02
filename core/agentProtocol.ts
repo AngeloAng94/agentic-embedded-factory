@@ -76,6 +76,8 @@ export function buildTurnPrompt(input: {
   previousPatches?: string[];
   /** Block names the model may edit, from the product profile. */
   anchors?: string[];
+  /** Known issues/parser diagnosis to include with the compiler error. */
+  repairContext?: string;
 }): string {
   const fileBlock = input.files
     .map((file) => `--- BEGIN ${file.path} ---\n${file.content}\n--- END ${file.path} ---`)
@@ -92,6 +94,9 @@ export function buildTurnPrompt(input: {
   }
   if (input.knowledge.trim() !== "") {
     sections.push(`RELEVANT KNOWLEDGE BASE FRAGMENTS:\n${input.knowledge}`);
+  }
+  if (input.repairContext?.trim()) {
+    sections.push(`KNOWN ISSUES / REPAIR CONTEXT:\n${input.repairContext.trim()}`);
   }
   sections.push(`CURRENT FILES:\n${fileBlock || "(empty repository)"}`);
   if (input.previousPatches && input.previousPatches.length > 0) {

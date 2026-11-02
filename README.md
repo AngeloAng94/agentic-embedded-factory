@@ -8,12 +8,12 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 6b complete** (the Phase 5 corrections, no implicit acceptance
-> criterion, and a `ModelRuntime` with the existing LLM client, Claude Agent SDK
-> and an explicitly marked fake test double). Phase 6c (orchestrator) and 6d
-> (branch/report/restore) do not exist yet; see
+> **State: Phase 6c complete** (the Phase 5 corrections, no implicit acceptance
+> criterion, a `ModelRuntime` with the existing LLM client, Claude Agent SDK and
+> an explicitly marked fake test double, and the end-to-end orchestrator). Phase
+> 6d (branch/report/restore) does not exist yet; see
 > [What is not here yet](#what-is-not-here-yet). Nothing in this README describes
-> them as working.
+> 6d as working.
 >
 > There is no board and no cross toolchain in the development environment: every
 > real tool answers `NOT_AVAILABLE` with the reason, and the hardware test is
@@ -36,6 +36,11 @@ that the agent **cannot claim anything it has not measured**.
 | `flash` refuses unless the current run record has a `memory_map_check` SUCCESS for the same ELF SHA-256 and the latest doctor did not mark the target unreliable | `tools/mcp/runState.ts`, `tools/mcp/server.ts` |
 | `flash` accepts an ELF, or a `.bin`/`.hex` only when the tool derived it from a checked ELF; the run record stores `sha256 ELF → sha256 bin/hex`, and an external binary without that derivation is refused | `tools/mcp/artifacts.ts`, `tools/mcp/runState.ts`, `tools/mcp/server.ts` |
 | A profile without acceptance criteria is valid: the run stops at `compiled`, the verdict stays `UNKNOWN`, and the reason is carried in the run report | `agent/repairLoop.ts`, `core/runRecord.ts`, `core/profile.ts` |
+| The orchestrator uses the same build, `memory_map_check`, flash gate, flash, serial and on-target-test functions as the MCP server; it never reimplements a gate | `agent/orchestrator.ts`, `tools/build.ts`, `tools/memoryMap.ts`, `tools/mcp/runState.ts`, `tools/flash.ts`, `tools/serialCapture.ts`, `tools/targetTest.ts` |
+| Every orchestrated run has a total-time and flash budget from the profile (`budget.tempo_totale_ms`, `budget.flash_max`), with prudent defaults; exceeding either stops the run and records why | `core/profile.ts`, `agent/orchestrator.ts` |
+| The orchestrator starts serial capture before build/flash; an incomplete capture leaves serial criteria unevaluated (never failed) and cannot reach `observed` | `agent/orchestrator.ts`, `tools/serialCapture.ts`, `core/verificationLevels.ts` |
+| Deterministic repair is also block-scoped: an include or layout fix outside `[AI_START_*]` is refused and handed to the model with the reason | `agent/deterministicRepair.ts`, `core/blockPatch.ts` |
+| The run report ends with the acceptance-criterion → outcome table; there is no prose after it | `agent/runReport.ts`, `agent/orchestrator.ts` |
 | The generation provider is selected by the profile; the fake runtime is a marked test double that requires an explicit opt-in and never falls back to a real provider | `core/profile.ts`, `agent/modelRuntime.ts`, `agent/turn.ts` |
 | `debug` uses a GDB allowlist: breakpoints, halt/continue, RAM/register reads and writes, detach; `load`, `restore` into FLASH, programming monitors and OpenOCD/probe-rs flash commands are refused | `tools/debugPolicy.ts`, `tools/debug.ts`, `tools/mcp/server.ts` |
 | `target_test` that loads firmware passes through the same flash gate as `flash` | `tools/mcp/server.ts`, `tools/mcp/runState.ts` |
@@ -56,10 +61,10 @@ that the agent **cannot claim anything it has not measured**.
 | The repair loop emits a validated `RunRecord` through `recordRun`; its level and status are derived from the evidence, never from the model or the build alone | `agent/repairLoop.ts`, `core/runRecord.ts` |
 | A model answer is only a proposal: `runAgentTurn` passes it through the same validated-patch path regardless of whether the runtime is the LLM client, Claude Agent SDK or the fake double | `agent/turn.ts`, `agent/modelRuntime.ts` |
 
-Not yet implemented, and deliberately absent from the code: the orchestrator,
-hardware tools wired into the repair loop, on-target observation produced by the
-loop, branch/report/restore, the CLI and the demo. The hardware tools exist but
-have never run on a board in this environment.
+Not yet implemented, and deliberately absent from the code: branch/commit/restore
+per run, `report.md`, `known_issues.yaml`, the CLI and the demo (Phase 6d and
+later). The hardware tools are wired into the orchestrator but have never run on
+a board in this environment.
 
 ## Layout
 
@@ -95,10 +100,16 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
                modelRuntime.ts  provider boundary: llmClient, Claude Agent SDK,
                               explicit fake test double
+               deterministicRepair.ts  parser ring for common GCC/linker errors;
+                              every fix is still a blockPatch edit
+               orchestrator.ts  serial start → build → map → flash → observe →
+                              criteria → RunRecord/report, with budgets and
+                              the same gates as the MCP server
+               runReport.ts   report derived from evidence; criterion table last
                repairLoop.ts  the loop: build → compiler error → patch → rebuild;
                               emits the validated RunRecord through `recordRun`
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         290 tests: 280 pass, 10 skipped without a board / toolchain / git / Claude key
+tests/         322 tests: 312 pass, 10 skipped without a board / toolchain / git / Claude key
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -145,7 +156,7 @@ chip:
 
 ```bash
 bun install
-bun test                     # 280 pass, 10 skip (290 tests; board / toolchain / git / Claude key opt-in)
+bun test                     # 312 pass, 10 skip (322 tests; board / toolchain / git / Claude key opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -267,6 +278,38 @@ status is `UNKNOWN`, and `reason` states that no criterion was evaluated on the
 target. `reason` is derived from the record by `runRecordReason`, not written by
 the model.
 
+## The orchestrated run
+
+`agent/orchestrator.ts` runs the complete sequence for a profile:
+
+```
+serial start → build → memory_map_check → canFlash gate → flash → serial stop
+             → acceptance criteria → RunRecord → report
+```
+
+Build failures first go to `agent/deterministicRepair.ts`, which recognizes the
+common GCC/linker errors. An undefined symbol gets a stub **inside a declared
+block**, through `applyBlockEdits`; a missing include, region overflow or type
+clash is refused with the reason and handed to `runAgentTurn` together with the
+real compiler output and any exact-text known-issue hints. A deterministic fix
+that would require an edit outside the markers is never applied.
+
+The serial session is started before the build and flash. If `stop()` reports
+`complete: false` because a flash/reset happened first, the orchestrator records
+the serial criteria as unevaluated (`NOT_AVAILABLE`/`UNKNOWN`, not failed) and
+`observed` is unreachable. The report's last line is always the criterion table:
+
+```
+| Criterio di accettazione | Esito |
+| --- | --- |
+| serial output contains "BOOT OK" (`seriale_contiene[0]`) | PASS |
+```
+
+Every run reads `budget.tempo_totale_ms` and `budget.flash_max` from the profile;
+when absent, the parser defaults to 8 minutes and 2 flashes. A budget stop is
+written into the run record's `reason`. `RunRecord` still stores no level or
+verdict: `level` and `status` are derived from the evidence.
+
 ## Model runtime and profile selection
 
 `agent/modelRuntime.ts` is the provider boundary used by `agent/turn.ts`:
@@ -332,13 +375,11 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phase 6c (the orchestrator: serial start → build → memory_map_check → flash →
-observation → criteria evaluation) and 6d (one VCS branch per run, one commit per
-attempt, restore on failure, `report.md` and `known_issues.yaml`) do not exist
-yet. The hardware tools are not wired into the repair loop, and none of them has
-run against a real board here. The MCP run record remains session-scoped; it is
-not the persistent store for repair-loop records. Phases 7–9 (the `py job` CLI
-and demo) are also absent.
+Phase 6d (one VCS branch per run, one commit per attempt, restore on failure,
+`report.md` and `known_issues.yaml`) does not exist yet. The hardware tools are
+wired into the orchestrator, but none of them has run against a real board here.
+The MCP run record remains session-scoped; it is not the persistent store for
+repair-loop records. Phases 7–9 (the `py job` CLI and demo) are also absent.
 
 `memory_map_check` reports per-region usage only after the VMA/LMA checks; a
 stripped ELF with no section headers is `NOT_AVAILABLE`, not a guess from the

@@ -7,6 +7,8 @@
  * A missing binary returns NOT_AVAILABLE with the name. A non-zero exit code is
  * NOT an error here: the compiler ran, the caller derives the verdict from it.
  */
+import { readdirSync } from "node:fs";
+import path from "node:path";
 import type { ProductProfile } from "../core/profile";
 import { invalidProfile, notAvailable, toolOk, type ToolOutcome } from "../core/toolResult";
 import {
@@ -57,4 +59,38 @@ export function runBuild(
   const plan = planBuild(profile, options);
   if (!plan.ok) return plan;
   return toolOk(runCommand(plan.value.argv, options));
+}
+
+/**
+ * Finds the ELF a build produced without trusting a path from the model. This
+ * is only artifact discovery; the flash gate still hashes and checks the file.
+ * Directories that never contain a firmware image are skipped, and the result
+ * is deterministic (shortest path first).
+ */
+export function findElfArtifact(root: string, options: { maxDepth?: number } = {}): string | null {
+  const maxDepth = options.maxDepth ?? 8;
+  const found: string[] = [];
+  const skip = new Set([".git", "node_modules", ".venv", "venv", "__pycache__"]);
+
+  const walk = (dir: string, depth: number): void => {
+    if (depth > maxDepth) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (skip.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".elf")) {
+        found.push(full);
+      }
+    }
+  };
+
+  walk(path.resolve(root), 0);
+  return found.sort((left, right) => left.length - right.length || left.localeCompare(right))[0] ?? null;
 }

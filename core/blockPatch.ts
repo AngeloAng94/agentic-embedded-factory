@@ -54,6 +54,20 @@ function markerLine(kind: "START" | "END", block: string): RegExp {
   return new RegExp(`^[ \\t]*//[ \\t]*\\[AI_${kind}_${block}\\][ \\t]*\\r?$`);
 }
 
+/** Reads the current body of one declared block, or null when it is not unique. */
+export function blockBody(current: string, block: string): string | null {
+  const lines = current.split("\n");
+  const startRe = markerLine("START", block);
+  const endRe = markerLine("END", block);
+  const starts = lines.filter((line) => startRe.test(line)).length;
+  const ends = lines.filter((line) => endRe.test(line)).length;
+  if (starts !== 1 || ends !== 1) return null;
+  const start = lines.findIndex((line) => startRe.test(line));
+  const end = lines.findIndex((line) => endRe.test(line));
+  if (start < 0 || end <= start) return null;
+  return lines.slice(start + 1, end).join("\n");
+}
+
 /** Applies one edit to one file. Pure: the input string is never mutated. */
 export function applyBlockEdit(current: string, block: string, content: string): BlockEditResult {
   if (block.trim() === "") {
@@ -116,8 +130,7 @@ export function applyBlockEdit(current: string, block: string, content: string):
     };
   }
 
-  const crlf = current.includes("\r\n");
-  const body = content.replace(/\r\n/g, "\n").replace(/^\n+/, "").replace(/\n+$/, "");
+  const crlf = current.includes("\r\n");    const body = content.replace(/\r\n/g, "\n").replace(/^\n+/, "").replace(/\n+$/, "");
   const bodyLines = body === "" ? [] : body.split("\n").map((line) => (crlf ? `${line}\r` : line));
 
   const next = [...lines.slice(0, start + 1), ...bodyLines, ...lines.slice(end)].join("\n");

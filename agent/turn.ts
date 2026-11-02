@@ -59,6 +59,8 @@ export interface TurnRequest {
   knowledge?: KbDocument[];
   /** Blocks declared in the product profile; an edit outside them is rejected. */
   anchors?: string[];
+  /** Parser diagnosis and known-issue hints for a repair turn. */
+  repairContext?: string;
   /** Previous real build evidence, used on repair turns. */
   buildResult?: BuildResult | null;
   attempt?: number;
@@ -132,6 +134,7 @@ export async function runAgentTurn(request: TurnRequest): Promise<TurnOutcome> {
     buildResult: request.buildResult ?? null,
     attempt,
     anchors: request.anchors ?? [],
+    repairContext: request.repairContext,
   });
 
   const llm = await runtime.generate({

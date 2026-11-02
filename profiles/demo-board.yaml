@@ -26,6 +26,11 @@ debug:
 llm:
   provider: llmClient
 
+# Limiti di un run; i valori sotto sono i default prudenti.
+budget:
+  tempo_totale_ms: 480000
+  flash_max: 2
+
 # Blocchi modificabili: // [AI_START_APP] … // [AI_END_APP]
 ancore:
   - APP

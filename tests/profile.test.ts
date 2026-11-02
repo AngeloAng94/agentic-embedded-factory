@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { editableAnchors, loadProfile, profileCriteria } from "../core/profile";
+import {
+  DEFAULT_RUN_FLASH_BUDGET,
+  DEFAULT_RUN_TIME_BUDGET_MS,
+  editableAnchors,
+  loadProfile,
+  profileCriteria,
+} from "../core/profile";
 
 const CHIP = [
   "chip:",
@@ -50,8 +56,36 @@ describe("product profile", () => {
       expect(result.profile.ancore).toEqual(["APP", "LED"]);
       expect(result.profile.criteri).toHaveLength(3);
       expect(result.profile.tentativi_max).toBe(3);
+      expect(result.profile.budget).toEqual({ tempo_totale_ms: 480000, flash_max: 2 });
       expect(editableAnchors(result.profile)).toEqual(["APP", "LED"]);
     }
+  });
+
+  test("defaults the run budget prudently when budget is absent", () => {
+    const result = loadProfile(BASE);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.profile.budget).toEqual({
+        tempo_totale_ms: DEFAULT_RUN_TIME_BUDGET_MS,
+        flash_max: DEFAULT_RUN_FLASH_BUDGET,
+      });
+    }
+  });
+
+  test("parses budget overrides and rejects invalid bounds", () => {
+    const result = loadProfile(`${BASE}budget: { tempo_totale_ms: 120000, flash_max: 0 }`);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.profile.budget).toEqual({ tempo_totale_ms: 120000, flash_max: 0 });
+
+    expect(errorsOf(`${BASE}budget: { tempo_totale_ms: 999, flash_max: 2 }`)).toContain(
+      "budget.tempo_totale_ms",
+    );
+    expect(errorsOf(`${BASE}budget: { tempo_totale_ms: 1000, flash_max: 21 }`)).toContain(
+      "budget.flash_max",
+    );
+    expect(errorsOf(`${BASE}budget: { tempo_totale_ms: 1000, extra: 1 }`)).toContain(
+      "budget.extra",
+    );
   });
 
   test("a valid profile parses every criterion", () => {

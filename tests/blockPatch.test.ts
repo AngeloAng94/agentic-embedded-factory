@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyBlockEdit, applyBlockEdits, type RuleFile } from "../core/blockPatch";
+import { applyBlockEdit, applyBlockEdits, blockBody, type RuleFile } from "../core/blockPatch";
 
 const FILE = [
   "#include <stdint.h>",
@@ -99,6 +99,22 @@ describe("block patch — inside the markers", () => {
     const result = applyBlockEdit(FILE, "APP", "  \n ");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("EMPTY_BLOCK");
+  });
+});
+
+describe("block patch — reading a block", () => {
+  test("returns only the body between the unique markers", () => {
+    expect(blockBody(FILE, "APP")).toBe(["int main(void) {", "    return 0;", "}"].join("\n"));
+    expect(blockBody(FILE, "LED")).toBe("void led_init(void) {}");
+  });
+
+  test("returns null for an absent or duplicate block", () => {
+    expect(blockBody(FILE, "NOPE")).toBeNull();
+    expect(blockBody(`${FILE}\n// [AI_START_APP]\n// [AI_END_APP]\n`, "APP")).toBeNull();
+  });
+
+  test("returns an empty string for an existing empty block", () => {
+    expect(blockBody("// [AI_START_APP]\n// [AI_END_APP]\n", "APP")).toBe("");
   });
 });
 

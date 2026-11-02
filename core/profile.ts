@@ -22,6 +22,17 @@ export interface ModelConfig {
   model?: string;
 }
 
+/** Prudent defaults when the profile does not declare a budget. */
+export const DEFAULT_RUN_TIME_BUDGET_MS = 8 * 60 * 1000;
+export const DEFAULT_RUN_FLASH_BUDGET = 2;
+
+export interface RunBudget {
+  /** Total wall-clock budget for one orchestrated run. */
+  tempo_totale_ms: number;
+  /** Maximum number of real flash operations in one run. */
+  flash_max: number;
+}
+
 export type Criterion =
   | { seriale_contiene: string }
   | { log_non_contiene: string[] }
@@ -61,6 +72,8 @@ export interface ProductProfile {
   seriale?: SerialConfig;
   /** Optional generation backend; absent means the existing `llmClient`. */
   llm?: ModelConfig;
+  /** Whole-run limits; defaults are applied when this section is absent. */
+  budget: RunBudget;
   /** Editable block names: `// [AI_START_<name>]` … `// [AI_END_<name>]`. */
   ancore: string[];
   /** Empty is valid: without criteria the run can never reach `observed`. */
@@ -81,6 +94,7 @@ const TOP_KEYS = new Set([
   "debug",
   "seriale",
   "llm",
+  "budget",
   "ancore",
   "criteri",
   "tentativi_max",
@@ -391,6 +405,32 @@ export function loadProfile(text: string): ProfileResult {
     if (server !== null && port !== null) debug = { gdb_server: server, access_port: port };
   }
 
+  let budget: RunBudget = {
+    tempo_totale_ms: DEFAULT_RUN_TIME_BUDGET_MS,
+    flash_max: DEFAULT_RUN_FLASH_BUDGET,
+  };
+  if (parsed.budget !== undefined) {
+    if (!isObject(parsed.budget)) {
+      errors.push("budget: must be an object");
+    } else {
+      checkKeys(parsed.budget, ["tempo_totale_ms", "flash_max"], "budget", errors);
+      if (parsed.budget.tempo_totale_ms !== undefined) {
+        const tempo = integerAt(
+          parsed.budget.tempo_totale_ms,
+          "budget.tempo_totale_ms",
+          errors,
+          1_000,
+          24 * 60 * 60 * 1000,
+        );
+        if (tempo !== null) budget = { ...budget, tempo_totale_ms: tempo };
+      }
+      if (parsed.budget.flash_max !== undefined) {
+        const flashes = integerAt(parsed.budget.flash_max, "budget.flash_max", errors, 0, 20);
+        if (flashes !== null) budget = { ...budget, flash_max: flashes };
+      }
+    }
+  }
+
   let seriale: SerialConfig | undefined;
   if (parsed.seriale !== undefined) {
     if (!isObject(parsed.seriale)) {
@@ -472,6 +512,7 @@ export function loadProfile(text: string): ProfileResult {
       debug: debug!,
       seriale,
       llm,
+      budget,
       ancore,
       criteri,
       tentativi_max: tentativi!,
