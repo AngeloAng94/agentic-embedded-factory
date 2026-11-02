@@ -6,7 +6,10 @@
  */
 
 export interface FixtureSegment {
+  /** Physical load address (p_paddr). */
   address: number;
+  /** Virtual address (p_vaddr); defaults to `address`. */
+  vaddr?: number;
   bytes: number[];
   /** PF_R=4, PF_W=2, PF_X=1; default R|X. */
   flags?: number;
@@ -18,9 +21,12 @@ export interface FixtureSection {
   type?: number;
   /** SHF_WRITE=1, SHF_ALLOC=2, SHF_EXECINSTR=4. */
   flags: number;
+  /** VMA (sh_addr). */
   address: number;
   bytes?: number[];
   size?: number;
+  /** LMA; creates a PT_LOAD segment with this p_paddr and VMA = address. */
+  loadAddress?: number;
 }
 
 export interface ElfFixtureOptions {
@@ -37,10 +43,29 @@ const SHT_PROGBITS = 1;
 const SHT_NOBITS = 8;
 const SHT_STRTAB = 3;
 
+/** Little-endian Cortex-M vector table: word 0 = initial SP, word 1 = reset. */
+export function vectorBytes(stack: number, reset: number, size = 256): number[] {
+  const bytes = new Uint8Array(size);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, stack >>> 0, true);
+  view.setUint32(4, reset >>> 0, true);
+  return [...bytes];
+}
+
 export function buildElf32(options: ElfFixtureOptions): Uint8Array {
-  const segments = options.segments ?? [];
   const sections = options.sections ?? [];
+  const explicitSegments = options.segments ?? [];
   const encoder = new TextEncoder();
+
+  const implicitSegments: FixtureSegment[] = sections
+    .filter((section) => section.loadAddress !== undefined && section.type !== SHT_NOBITS)
+    .map((section) => ({
+      address: section.loadAddress!,
+      vaddr: section.address,
+      bytes: section.bytes ?? new Array<number>(section.size ?? 0).fill(0),
+      flags: 4 | (section.flags & 2 ? 2 : 0) | (section.flags & 4 ? 1 : 0),
+    }));
+  const segments = [...explicitSegments, ...implicitSegments];
 
   const names = [...sections.map((section) => section.name), ".shstrtab"];
   const nameBytes: number[] = [0];
@@ -103,7 +128,7 @@ export function buildElf32(options: ElfFixtureOptions): Uint8Array {
     const base = phoff + index * PROGRAM_HEADER_SIZE;
     view.setUint32(base, PT_LOAD, true);
     view.setUint32(base + 4, segmentOffsets[index]!, true);
-    view.setUint32(base + 8, segment.address, true);
+    view.setUint32(base + 8, segment.vaddr ?? segment.address, true);
     view.setUint32(base + 12, segment.address, true);
     view.setUint32(base + 16, segment.bytes.length, true);
     view.setUint32(base + 20, segment.bytes.length, true);

@@ -24,11 +24,22 @@ export interface SerialConfig {
   comando?: string;
 }
 
+export type MemoryRegionType = "flash" | "ram";
+
+export interface MemoryRegion {
+  nome: string;
+  tipo: MemoryRegionType;
+  /** First byte of the region, as a 32-bit address. */
+  origine: number;
+  /** Region length in bytes. */
+  dimensione: number;
+}
+
 export interface ProductProfile {
   prodotto: string;
   /** Zephyr board name (e.g. a west board); required for `zephyr-west`. */
   board?: string;
-  chip: { famiglia: string; flash_kb: number; ram_kb: number };
+  chip: { famiglia: string; regioni: MemoryRegion[] };
   build: { sistema: BuildSystem; toolchain: string; comando: string };
   flash: { tool: FlashTool; interfaccia: FlashInterface; target?: string };
   debug: { gdb_server: string; access_port: number };
@@ -60,6 +71,8 @@ const FLASH_INTERFACES: FlashInterface[] = ["swd", "jtag"];
 const FLASH_TOOLS: FlashTool[] = ["STM32_Programmer_CLI", "openocd", "probe-rs", "west"];
 const ANCHOR_RE = /^[A-Z][A-Z0-9_]*$/;
 const MAX_ATTEMPTS = 10;
+const MAX_ADDRESS = 0xffff_ffff;
+const ADDRESS_SPACE_END = 0x1_0000_0000;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,6 +96,102 @@ function integerAt(value: unknown, path: string, errors: string[], min: number, 
     return null;
   }
   return value;
+}
+
+function hex(address: number): string {
+  return `0x${address.toString(16)}`;
+}
+
+/** Accepts a YAML hex integer or an explicit `0x...` string, never a guess. */
+function addressAt(value: unknown, path: string, errors: string[]): number | null {
+  if (typeof value === "number") {
+    if (Number.isInteger(value) && value >= 0 && value <= MAX_ADDRESS) return value;
+    errors.push(`${path}: must be an address between 0 and 0xffffffff`);
+    return null;
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (/^0x[0-9a-f]+$/i.test(text)) {
+      const parsed = Number.parseInt(text.slice(2), 16);
+      if (Number.isSafeInteger(parsed) && parsed <= MAX_ADDRESS) return parsed;
+    }
+  }
+  errors.push(`${path}: must be a hex address (0x...) between 0 and 0xffffffff`);
+  return null;
+}
+
+function byteSizeAt(value: unknown, path: string, errors: string[]): number | null {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_ADDRESS
+  ) {
+    errors.push(`${path}: must be a positive integer number of bytes (1..0xffffffff)`);
+    return null;
+  }
+  return value;
+}
+
+function parseRegions(raw: unknown, errors: string[]): MemoryRegion[] {
+  const at = "chip.regioni";
+  if (!Array.isArray(raw) || raw.length === 0) {
+    errors.push(`${at}: must be a non-empty list of memory regions`);
+    return [];
+  }
+
+  const regions: MemoryRegion[] = [];
+  const names = new Set<string>();
+  raw.forEach((entry, index) => {
+    const path = `${at}[${index}]`;
+    if (!isObject(entry)) {
+      errors.push(`${path}: must be an object`);
+      return;
+    }
+    checkKeys(entry, ["nome", "tipo", "origine", "dimensione"], path, errors);
+
+    const nome = stringAt(entry.nome, `${path}.nome`, errors);
+    if (nome !== null) {
+      if (names.has(nome)) errors.push(`${path}.nome: duplicate region "${nome}"`);
+      else names.add(nome);
+    }
+
+    let tipo: MemoryRegionType | null = null;
+    if (entry.tipo === "flash" || entry.tipo === "ram") tipo = entry.tipo;
+    else errors.push(`${path}.tipo: must be "flash" or "ram"`);
+
+    const origine = addressAt(entry.origine, `${path}.origine`, errors);
+    const dimensione = byteSizeAt(entry.dimensione, `${path}.dimensione`, errors);
+    if (nome === null || tipo === null || origine === null || dimensione === null) return;
+    if (origine + dimensione > ADDRESS_SPACE_END) {
+      errors.push(`${path}.dimensione: region "${nome}" ends past 0xffffffff`);
+      return;
+    }
+
+    regions.push({ nome, tipo, origine, dimensione });
+  });
+
+  if (regions.length > 0) {
+    if (!regions.some((region) => region.tipo === "flash")) {
+      errors.push(`${at}: at least one "flash" region is required`);
+    }
+    if (!regions.some((region) => region.tipo === "ram")) {
+      errors.push(`${at}: at least one "ram" region is required`);
+    }
+  }
+
+  const sorted = [...regions].sort((left, right) => left.origine - right.origine);
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1]!;
+    const current = sorted[index]!;
+    if (previous.origine + previous.dimensione > current.origine) {
+      errors.push(
+        `${at}: region "${previous.nome}" (${hex(previous.origine)}..${hex(previous.origine + previous.dimensione)}) overlaps region "${current.nome}" (${hex(current.origine)}..${hex(current.origine + current.dimensione)})`,
+      );
+    }
+  }
+
+  return regions;
 }
 
 function checkKeys(value: Record<string, unknown>, allowed: string[], path: string, errors: string[]): void {
@@ -158,13 +267,19 @@ export function loadProfile(text: string): ProfileResult {
   if (!isObject(parsed.chip)) {
     errors.push("chip: must be an object");
   } else {
-    checkKeys(parsed.chip, ["famiglia", "flash_kb", "ram_kb"], "chip", errors);
-    const famiglia = stringAt(parsed.chip.famiglia, "chip.famiglia", errors);
-    const flash = integerAt(parsed.chip.flash_kb, "chip.flash_kb", errors, 1, 16384);
-    const ram = integerAt(parsed.chip.ram_kb, "chip.ram_kb", errors, 1, 4096);
-    if (famiglia !== null && flash !== null && ram !== null) {
-      chip = { famiglia, flash_kb: flash, ram_kb: ram };
+    // Keep the old names in the allowed set so the error is the migration
+    // message, not a generic "unknown field" that hides what to do.
+    checkKeys(parsed.chip, ["famiglia", "regioni", "flash_kb", "ram_kb"], "chip", errors);
+    for (const legacy of ["flash_kb", "ram_kb"] as const) {
+      if (legacy in parsed.chip) {
+        errors.push(
+          `chip.${legacy}: deprecated — declare chip.regioni: [{ nome, tipo: flash|ram, origine: 0x..., dimensione: <bytes> }] instead`,
+        );
+      }
     }
+    const famiglia = stringAt(parsed.chip.famiglia, "chip.famiglia", errors);
+    const regioni = parseRegions(parsed.chip.regioni, errors);
+    if (famiglia !== null && regioni.length > 0) chip = { famiglia, regioni };
   }
 
   let build: ProductProfile["build"] | null = null;

@@ -4,8 +4,10 @@ prodotto: DEMO-BOARD-01
 
 chip:
   famiglia: stm32
-  flash_kb: 2048
-  ram_kb: 640
+  # dimensione in byte; più regioni RAM sono ammesse
+  regioni:
+    - { nome: FLASH, tipo: flash, origine: 0x08000000, dimensione: 2097152 }
+    - { nome: RAM, tipo: ram, origine: 0x20000000, dimensione: 655360 }
 
 build:
   sistema: cmake

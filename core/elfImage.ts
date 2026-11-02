@@ -4,8 +4,8 @@
  * The memory map and the doctor must read the same bytes the linker produced:
  * no `readelf`, no `objdump`, no shell. Supports ELF32/ELF64, little and big
  * endian. Only what is needed is decoded: the entry point, PT_LOAD segments
- * (used to compare flash with the expected image) and section headers (used to
- * compute FLASH/RAM usage).
+ * (flash comparison, LMA and address-based reads) and section headers (VMA,
+ * LMA, section bytes for the vector table).
  *
  * A malformed table is reported, never skipped silently.
  */
@@ -19,8 +19,16 @@ export const SHF_ALLOC = 2;
 export const SHF_EXECINSTR = 4;
 
 export interface ElfSegment {
-  /** Physical load address, falling back to the virtual address. */
+  /** Doctor-facing physical address, with the old vaddr fallback for p_paddr = 0. */
   address: number;
+  /** Exact p_paddr; used for LMA and address-based reads. */
+  physicalAddress: number;
+  /** Virtual address (p_vaddr); equal to `address` for ordinary flash code. */
+  vaddr: number;
+  /** File offset of the segment bytes. */
+  offset: number;
+  fileSize: number;
+  memorySize: number;
   bytes: Uint8Array;
   flags: number;
 }
@@ -29,8 +37,18 @@ export interface ElfSection {
   name: string;
   type: number;
   flags: number;
+  /** Execution address (VMA, sh_addr). */
   address: number;
   size: number;
+  fileOffset: number;
+  fileSize: number;
+  /** Raw section bytes (empty for SHT_NOBITS). */
+  fileBytes: Uint8Array;
+  /**
+   * Load address (LMA), derived from the PT_LOAD segment that covers the
+   * section: p_paddr + (sh_addr - p_vaddr). Undefined when no segment maps it.
+   */
+  loadAddress?: number;
 }
 
 export interface ElfImage {
@@ -98,17 +116,20 @@ export function parseElfImage(bytes: Uint8Array): ElfParseResult {
     let vaddr: number;
     let paddr: number;
     let filesz: number;
+    let memsz: number;
     if (is64) {
       flags = u32(base + 4);
       offset = u64(base + 8);
       vaddr = u64(base + 16);
       paddr = u64(base + 24);
       filesz = u64(base + 32);
+      memsz = u64(base + 40);
     } else {
       offset = u32(base + 4);
       vaddr = u32(base + 8);
       paddr = u32(base + 12);
       filesz = u32(base + 16);
+      memsz = u32(base + 20);
       flags = u32(base + 24);
     }
 
@@ -118,6 +139,11 @@ export function parseElfImage(bytes: Uint8Array): ElfParseResult {
     }
     segments.push({
       address: paddr === 0 && vaddr !== 0 ? vaddr : paddr,
+      physicalAddress: paddr,
+      vaddr,
+      offset,
+      fileSize: filesz,
+      memorySize: memsz,
       bytes: bytes.slice(offset, offset + filesz),
       flags,
     });
@@ -171,16 +197,46 @@ export function parseElfImage(bytes: Uint8Array): ElfParseResult {
 
   const sections: ElfSection[] = [];
   for (const raw of rawSections) {
+    const name = nameAt(raw.nameOffset);
     if (raw.type !== SHT_NOBITS && raw.size > 0 && raw.offset + raw.size > bytes.length) {
-      return fail(`section "${nameAt(raw.nameOffset)}" points outside the file`);
+      return fail(`section "${name}" points outside the file`);
     }
-    sections.push({
-      name: nameAt(raw.nameOffset),
+
+    const hasFileBytes = raw.type !== SHT_NOBITS && raw.size > 0;
+    const section: ElfSection = {
+      name,
       type: raw.type,
       flags: raw.flags,
       address: raw.address,
       size: raw.size,
-    });
+      fileOffset: raw.offset,
+      fileSize: hasFileBytes ? raw.size : 0,
+      fileBytes: hasFileBytes ? bytes.subarray(raw.offset, raw.offset + raw.size) : new Uint8Array(0),
+    };
+
+    if (section.fileSize > 0) {
+      // A section may be stored in a segment whose p_vaddr differs from p_paddr
+      // (the normal .data case: VMA in RAM, LMA in flash). Match by VMA first;
+      // the file-offset check disambiguates when two segments share a VMA.
+      const segment =
+        segments.find(
+          (candidate) =>
+            section.address >= candidate.vaddr &&
+            section.address + section.size <= candidate.vaddr + candidate.memorySize &&
+            section.fileOffset >= candidate.offset &&
+            section.fileOffset + section.fileSize <= candidate.offset + candidate.fileSize,
+        ) ??
+        segments.find(
+          (candidate) =>
+            section.address >= candidate.vaddr &&
+            section.address + section.size <= candidate.vaddr + candidate.memorySize,
+        );
+      if (segment) {
+        section.loadAddress = segment.physicalAddress + (section.address - segment.vaddr);
+      }
+    }
+
+    sections.push(section);
   }
 
   return {

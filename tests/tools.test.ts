@@ -11,7 +11,11 @@ import { FAKE_RUNNER, fakeBuild, fakeFlash, fakeRead } from "./helpers/fakeRunne
 
 const CMAKE_YAML = [
   "prodotto: DEMO-BOARD-01",
-  "chip: { famiglia: stm32, flash_kb: 2048, ram_kb: 640 }",
+  "chip:",
+  "  famiglia: stm32",
+  "  regioni:",
+  "    - { nome: FLASH, tipo: flash, origine: 0x08000000, dimensione: 2097152 }",
+  "    - { nome: RAM, tipo: ram, origine: 0x20000000, dimensione: 655360 }",
   'build: { sistema: cmake, toolchain: arm-none-eabi-gcc, comando: "cmake --build build" }',
   "flash: { tool: STM32_Programmer_CLI, interfaccia: swd }",
   "debug: { gdb_server: st, access_port: 0 }",
@@ -24,7 +28,11 @@ const CMAKE_YAML = [
 const ZEPHYR_YAML = [
   "prodotto: DEMO-ZEPHYR-01",
   "board: demo_board",
-  "chip: { famiglia: stm32, flash_kb: 1024, ram_kb: 256 }",
+  "chip:",
+  "  famiglia: stm32",
+  "  regioni:",
+  "    - { nome: FLASH, tipo: flash, origine: 0x08000000, dimensione: 1048576 }",
+  "    - { nome: RAM, tipo: ram, origine: 0x20000000, dimensione: 262144 }",
   'build: { sistema: zephyr-west, toolchain: arm-zephyr-eabi-gcc, comando: "west build" }',
   "flash: { tool: west, interfaccia: swd }",
   "debug: { gdb_server: st, access_port: 0 }",

@@ -10,9 +10,10 @@ that the agent **cannot claim anything it has not measured**.
 
 > **State: Phase 4 complete** (native tools: profile doctor with target checks,
 > build, flash, `read_state` with declared mode, GDB batch, serial capture
-> session, on-target test, `memory_map_check`; CMake and Zephyr `west` build
-> adapters). The orchestrator, the CLI, the MCP server and the demo do not exist
-> yet; see [What is not here yet](#what-is-not-here-yet). Nothing in this README
+> session, on-target test, region-based `memory_map_check` with Cortex-M vector
+> checks; CMake and Zephyr `west` build adapters). The orchestrator, the CLI, the
+> MCP server and the demo do not exist yet; see
+> [What is not here yet](#what-is-not-here-yet). Nothing in this README
 > describes them as working.
 >
 > There is no board and no cross toolchain in the development environment: every
@@ -33,7 +34,9 @@ that the agent **cannot claim anything it has not measured**.
 | A flash mismatch is a doctor FAIL and makes every later read unreliable (`read_state` refuses) | `tools/doctor.ts`, `tools/probe.ts`, `tools/readState.ts` |
 | A busy probe or a blocked/unreachable core is a FAIL; unknown is `NOT_AVAILABLE` with the reason | `tools/doctor.ts` |
 | Serial capture must start before flash/reset; a late capture is marked incomplete | `tools/serialCapture.ts` |
-| FLASH/RAM usage comes from the ELF, and over budget is a FAILURE | `tools/memoryMap.ts`, `core/elfImage.ts` |
+| Every allocated section's VMA is inside a declared region of the right type, and `.data`'s LMA is inside FLASH | `tools/memoryMap.ts`, `core/elfImage.ts` |
+| The Cortex-M vector table has an 8-byte-aligned initial SP in RAM and a Thumb reset handler in FLASH | `tools/memoryMap.ts` |
+| `chip.regioni` is the only memory declaration; `flash_kb`/`ram_kb` are rejected with a migration error | `core/profile.ts` |
 | A profile cannot choose a flash tool without its target or a Zephyr build without a board | `core/profile.ts` |
 | The model proposes; only validated patches reach the files, all-or-nothing | `agent/turn.ts` |
 | Repair stops at 3 attempts, then the run fails and says so | `agent/repairLoop.ts` |
@@ -68,7 +71,7 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
                readState.ts   stable | progressing, declared by the caller
                debug.ts       GDB batch with explicit commands
                serialCapture.ts  session started before flash/reset; detects late starts
-               memoryMap.ts   FLASH/RAM budget, overlaps, entry point
+               memoryMap.ts   region VMA/LMA checks, vector table, entry point
                targetTest.ts  on-target test port; NOT_AVAILABLE until wired
                gitVcs.ts      real git implementation of VcsPort
                runner/        local HTTP runner (build / doctor / export / turn)
@@ -77,7 +80,7 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
                repairLoop.ts  the loop: build → compiler error → patch → rebuild
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         233 tests, 8 skipped without a board / toolchain / git opt-in
+tests/         253 tests, 9 skipped without a board / toolchain / git opt-in
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -93,11 +96,27 @@ minimum is pinned in `package.json` under `engines`. Everything else is a dev
 dependency except the platform's `@vly-ai/integrations` scaffold: the bench code
 under `core/`, `tools/` and `agent/` imports only Bun and Node built-ins.
 
+## Chip regions
+
+`chip.regioni` is the only source of memory ranges. Each region has a `nome`, a
+`tipo` (`flash` or `ram`), an `origine` hex address and a `dimensione` in bytes;
+more than one region of type `ram` is allowed. The old `flash_kb`/`ram_kb` pair
+is rejected with an explicit error that asks for the regions, never accepted as
+a fallback:
+
+```yaml
+chip:
+  famiglia: stm32
+  regioni:
+    - { nome: FLASH, tipo: flash, origine: 0x08000000, dimensione: 2097152 }
+    - { nome: RAM,   tipo: ram,   origine: 0x20000000, dimensione: 655360 }
+```
+
 ## Commands
 
 ```bash
 bun install
-bun test                     # 225 pass, 8 skip (board / toolchain / git opt-in)
+bun test                     # 244 pass, 9 skip (board / toolchain / git opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -110,6 +129,9 @@ PY_BENCH_HW_PROFILE=profiles/demo-board.yaml \
 PY_BENCH_HW_PROJECT=/path/to/firmware \
 PY_BENCH_HW_ARTIFACT=/path/to/firmware/build/app.elf \
 bun test tests/hw.real.test.ts
+
+# a real ELF compiled by arm-none-eabi-gcc, skipped without the opt-in/toolchain
+PY_BENCH_ALLOW_REAL_TOOLCHAIN=1 bun test tests/memoryMap.real.test.ts
 
 # real git integration tests, skipped by default (the dev sandbox forbids git)
 PY_BENCH_ALLOW_REAL_GIT=1 bun test tests/git.real.test.ts
@@ -153,6 +175,13 @@ The serial session must be started **before** flash or reset. `stop()` reports
 `complete: false` and lists the missed events when a flash/reset happened before
 the capture started, because the boot banner may contain the acceptance criteria.
 
+`memory_map_check` checks addresses, not just sizes: every allocated section's
+VMA must end inside a region of the expected type, every `.data` LMA must end
+inside FLASH, and the Cortex-M vector words are read from the `.isr_vector`
+(`.vectors`) section or from the start of the lowest FLASH region. The initial
+SP must be in RAM and 8-byte aligned; the reset handler must be in FLASH with
+bit 0 set. The ELF entry point is a secondary executable-section check.
+
 ## Legacy snapshot and the `embedfactory-v1` tag
 
 The tag could **not** be created here: git commands are blocked in this
@@ -167,9 +196,10 @@ SDK + the existing `core/llmClient.ts`), `py job` CLI, demo. The tools are not
 wired into the repair loop yet: the loop still emits no `RunRecord` (that is
 Phase 6), and none of the hardware tools has run against a real board here.
 
-`memory_map_check` reads FLASH usage from every allocated section that has file
-bytes and RAM usage from every allocated writable section; a stripped ELF with
-no section headers is `NOT_AVAILABLE`, not a guess from the file size.
+`memory_map_check` reports per-region usage only after the VMA/LMA checks; a
+stripped ELF with no section headers is `NOT_AVAILABLE`, not a guess from the
+file size. The optional real-toolchain test compiles a minimal firmware with
+`arm-none-eabi-gcc`; it is skipped here because that compiler is not installed.
 
 The web workspace and the landing page were removed from the active tree on
 purpose: this is a bench/CI tool now, not a web app. There is no dev server.

@@ -9,7 +9,11 @@ import {
 
 const PROFILE_YAML = [
   "prodotto: DEMO-BOARD-01",
-  "chip: { famiglia: stm32, flash_kb: 64, ram_kb: 16 }",
+  "chip:",
+  "  famiglia: stm32",
+  "  regioni:",
+  "    - { nome: FLASH, tipo: flash, origine: 0x08000000, dimensione: 65536 }",
+  "    - { nome: RAM, tipo: ram, origine: 0x20000000, dimensione: 16384 }",
   'build: { sistema: cmake, toolchain: arm-none-eabi-gcc, comando: "cmake --build build" }',
   "flash: { tool: STM32_Programmer_CLI, interfaccia: swd }",
   "debug: { gdb_server: st, access_port: 0 }",
