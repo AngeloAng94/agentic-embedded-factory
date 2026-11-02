@@ -403,6 +403,8 @@ async function main(): Promise<void> {
         mcu: flags.mcu ?? null,
         userMessage: flags.request ?? "",
         files,
+        // Blocks the model may edit; empty means "no edit is accepted".
+        anchors: flags.anchors ? (JSON.parse(flags.anchors) as string[]) : [],
         knowledge: Array.isArray(knowledgeRaw) ? (knowledgeRaw as never) : [],
       });
 

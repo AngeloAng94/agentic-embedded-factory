@@ -76,6 +76,8 @@ export interface RepairLoopRequest {
   userMessage: string;
   /** Static knowledge base documents (empty is valid: nothing is invented). */
   knowledge?: KbDocument[];
+  /** Editable block names from the product profile. */
+  anchors?: string[];
   /** Last real build evidence, used to start with context instead of guessing. */
   previousBuild?: BuildResult | null;
   maxAttempts?: number;
@@ -165,6 +167,7 @@ export async function runRepairLoop(
       userMessage: request.userMessage,
       files,
       knowledge: request.knowledge ?? [],
+      anchors: request.anchors ?? [],
       // Attempt 1 may reuse the last real build; later attempts use what this
       // loop just measured.
       buildResult: attempt > 1 ? buildResult : (request.previousBuild ?? null),

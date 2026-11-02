@@ -16,8 +16,10 @@ import {
   buildTurnPrompt,
   describePlan,
   parseAgentResponse,
+  type AgentEdit,
 } from "../core/agentProtocol";
-import { applyUnifiedDiff, parseUnifiedDiff } from "../core/diff";
+import { applyBlockEdits } from "../core/blockPatch";
+import { formatUnifiedDiff } from "../core/diff";
 import { isPathAllowed, MAX_FILE_BYTES } from "../core/pathSafety";
 import { MAX_REPAIR_ATTEMPTS } from "../core/buildStatus";
 import {
@@ -39,8 +41,11 @@ export interface TurnWrite {
   path: string;
   content: string;
   previousContent: string | null;
+  /** Unified diff generated from the change: for display/export, not input. */
   patch: string | null;
-  kind: "create" | "patch";
+  kind: "create" | "block-edit";
+  /** Block replaced by a block edit, null for a create. */
+  block: string | null;
 }
 
 export interface TurnRequest {
@@ -51,6 +56,8 @@ export interface TurnRequest {
   userMessage: string;
   files: TurnFile[];
   knowledge?: KbDocument[];
+  /** Blocks declared in the product profile; an edit outside them is rejected. */
+  anchors?: string[];
   /** Previous real build evidence, used on repair turns. */
   buildResult?: BuildResult | null;
   attempt?: number;
@@ -121,6 +128,7 @@ export async function runAgentTurn(request: TurnRequest): Promise<TurnOutcome> {
     userRequest: request.userMessage,
     buildResult: request.buildResult ?? null,
     attempt,
+    anchors: request.anchors ?? [],
   });
 
   const llm = await callLlm(llmConfig.config, `${AGENT_SYSTEM_PROMPT}\n\n${prompt}`);
@@ -178,55 +186,57 @@ export async function runAgentTurn(request: TurnRequest): Promise<TurnOutcome> {
       continue;
     }
     if (existing === create.content) continue;
-    writes.push({ path: create.path, content: create.content, previousContent: null, patch: null, kind: "create" });
+    writes.push({
+      path: create.path,
+      content: create.content,
+      previousContent: null,
+      patch: null,
+      kind: "create",
+      block: null,
+    });
   }
 
-  for (const patch of plan.patches) {
-    if (!isPathAllowed(patch.path)) {
-      rejected.push({ path: patch.path, reason: "path outside the project sandbox" });
+  // Block-scoped edits: only the body between [AI_START_<block>] and
+  // [AI_END_<block>] can change. All of them are applied at once or not at all.
+  const safeEdits: AgentEdit[] = [];
+  for (const edit of plan.edits) {
+    if (!isPathAllowed(edit.path)) {
+      rejected.push({ path: edit.path, reason: "path outside the project sandbox" });
       continue;
     }
-    if (seen.has(patch.path)) {
-      failed.push({ path: patch.path, code: "DUPLICATE_OPERATION", reason: "path touched twice" });
+    if (writes.some((write) => write.kind === "create" && write.path === edit.path)) {
+      failed.push({
+        path: edit.path,
+        code: "DUPLICATE_OPERATION",
+        reason: "the same plan creates and edits this file",
+      });
       continue;
     }
-    seen.add(patch.path);
+    safeEdits.push(edit);
+  }
 
-    const current = byPath.get(patch.path);
-    if (current === undefined) {
-      failed.push({
-        path: patch.path,
-        code: "PATCH_TARGET_MISSING",
-        reason: "patch targets a file that does not exist: send it as a create",
-      });
-      continue;
-    }
-    const parsedDiff = parseUnifiedDiff(patch.diff);
-    if (!parsedDiff.ok) {
-      failed.push({ path: patch.path, code: "PATCH_FAILED", reason: parsedDiff.reason });
-      continue;
-    }
-    if (parsedDiff.parsed.filePath && parsedDiff.parsed.filePath !== patch.path) {
-      failed.push({
-        path: patch.path,
-        code: "PATCH_PATH_MISMATCH",
-        reason: `diff header targets ${parsedDiff.parsed.filePath}`,
-      });
-      continue;
-    }
-    const outcome = applyUnifiedDiff(current, patch.diff);
+  if (safeEdits.length > 0) {
+    const outcome = applyBlockEdits(request.files, safeEdits, request.anchors ?? []);
     if (!outcome.ok) {
-      failed.push({ path: patch.path, code: "PATCH_FAILED", reason: outcome.reason });
-      continue;
+      for (const failure of outcome.failed) {
+        failed.push({
+          path: failure.path,
+          code: failure.code,
+          reason: `block ${failure.block}: ${failure.reason}`,
+        });
+      }
+    } else {
+      for (const applied of outcome.applied) {
+        writes.push({
+          path: applied.path,
+          content: applied.content,
+          previousContent: applied.previousContent,
+          patch: formatUnifiedDiff(applied.path, applied.previousContent, applied.content),
+          kind: "block-edit",
+          block: applied.block,
+        });
+      }
     }
-    if (outcome.content === current) continue;
-    writes.push({
-      path: patch.path,
-      content: outcome.content,
-      previousContent: current,
-      patch: patch.diff,
-      kind: "patch",
-    });
   }
 
   if (failed.length > 0) {

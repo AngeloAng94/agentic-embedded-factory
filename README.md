@@ -8,8 +8,9 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 1 complete** (structure and honesty-preserving extraction).
-> The CLI, the MCP server, flashing and the profile format do not exist yet; see
+> **State: Phase 2 complete** (VCS boundary, run record, verification levels,
+> validated product profile, block-scoped patching). The orchestrator, the CLI,
+> the MCP server and the hardware tools do not exist yet; see
 > [What is not here yet](#what-is-not-here-yet). Nothing in this README describes
 > them as working.
 
@@ -24,22 +25,33 @@ that the agent **cannot claim anything it has not measured**.
 | The model proposes; only validated patches reach the files, all-or-nothing | `agent/turn.ts` |
 | Repair stops at 3 attempts, then the run fails and says so | `agent/repairLoop.ts` |
 | The LLM answer never decides a verdict | `agent/repairLoop.ts` (verdicts come from the build result only) |
+| Levels `written → compiled → flashed → observed → confirmed` come from evidence only, consecutive, and `confirmed` needs a human | `core/verificationLevels.ts` |
+| A run record cannot store a level or a verdict: the schema rejects those fields | `core/runRecord.ts` |
+| Existing files change only inside `// [AI_START_<block>]`, for blocks declared in the profile; one bad edit writes nothing | `core/blockPatch.ts`, `agent/turn.ts` |
+| Every job works on its own branch and a failure discards it | `core/vcs.ts`, `tools/gitVcs.ts` |
 
 Not yet implemented, and deliberately absent from the code: flashing, on-target
-observation, memory-map checking, block-scoped patching, `ModelRuntime`.
+observation, memory-map checking, `ModelRuntime`, the CLI and MCP.
 
 ## Layout
 
 ```
 core/          types, verdicts, build engine + dispatch, LLM client (Ollama /
-               OpenAI-compatible), unified diff + path safety, doctor, artifact
-               inspection, project export, static safety analysis
+               OpenAI-compatible), path safety, doctor, artifact inspection,
+               project export, static safety analysis
+               vcs.ts               VcsPort + FAKE in-memory double
+               verificationLevels.ts  written → … → confirmed, from evidence
+               runRecord.ts         validated record; level/verdict are derived
+               profile.ts           product profile parser + total validation
+               blockPatch.ts        edits inside [AI_START_*] markers only
+tools/         gitVcs.ts      real git implementation of VcsPort
+               runner/        local HTTP runner (build / doctor / export / turn)
+                              and Zephyr verification. Transitional: Phase 3/5
+                              replace it with MCP tools invoked in-process.
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
                repairLoop.ts  the loop: build → compiler error → patch → rebuild
-tools/runner/  local HTTP runner (build / doctor / export / turn) and Zephyr
-               end-to-end verification. Transitional: Phase 3/5 replace it with
-               MCP tools invoked in-process.
-tests/         104 tests, 1 gated on a real Zephyr toolchain
+profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
+tests/         151 tests, 3 skipped without a toolchain / without git opt-in
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -58,7 +70,14 @@ bun run lint                 # eslint
 
 bun run doctor               # real toolchain probe; reports MISSING, never invents
 bun run runner:serve         # local build runner on 127.0.0.1:8790 (see tools/runner/README.md)
+
+# real git integration tests, skipped by default (the dev sandbox forbids git)
+PY_BENCH_ALLOW_REAL_GIT=1 bun test tests/git.real.test.ts
 ```
+
+The agent-loop tests start a **local HTTP server** (`Bun.serve` on 127.0.0.1, port 0)
+that speaks the Ollama/OpenAI-compatible shape: no network, no Ollama installed,
+deterministic. The only unreachable-provider case points at `127.0.0.1:1` on purpose.
 
 The runner needs `west`/`cmake`/`arm-none-eabi-gcc` on the machine. Without them
 every build answer is `NOT_AVAILABLE · UNKNOWN` with the reason, which is the
@@ -85,8 +104,7 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phases 2–9 of the plan: validated run record, `profiles/py.yaml`, block-scoped
-patching (`// [AI_START_…]`), STM32 tooling (flash, double `read_state`, GDB batch,
+Phases 3–9 of the plan: STM32 tooling (flash, double `read_state`, GDB batch,
 serial capture, `target_test`), memory map check, MCP server, `ModelRuntime`
 orchestrator (Claude Agent SDK + the existing `core/llmClient.ts`), `py job` CLI,
 demo.

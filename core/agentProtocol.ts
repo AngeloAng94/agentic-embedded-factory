@@ -14,15 +14,18 @@ export interface AgentCreate {
   content: string;
 }
 
-export interface AgentPatch {
+export interface AgentEdit {
   path: string;
-  diff: string;
+  /** Block declared in the product profile, e.g. APP for [AI_START_APP]. */
+  block: string;
+  /** Complete new body of the block, without marker lines. */
+  content: string;
 }
 
 export interface AgentPlan {
   summary: string;
   creates: AgentCreate[];
-  patches: AgentPatch[];
+  edits: AgentEdit[];
   requestBuild: boolean;
   /** True when the model only answered a question. */
   answerOnly: boolean;
@@ -39,14 +42,22 @@ JSON shape:
 {
   "summary": "short explanation of what you changed and why",
   "creates": [{ "path": "src/foo.c", "content": "complete new file content" }],
-  "patches": [{ "path": "src/main.c", "diff": "--- a/src/main.c\\n+++ b/src/main.c\\n@@ -1,4 +1,6 @@\\n context\\n-removed\\n+added" }],
+  "edits": [{ "path": "src/main.c", "block": "APP", "content": "new body of the block" }],
   "requestBuild": true,
   "answerOnly": false
 }
 
 Rules:
-- Existing files MUST be edited with "patches" (unified diff with 3 lines of context).
-  Context lines must match the current file byte for byte: a wrong patch is REJECTED.
+- Existing files are edited ONLY with "edits", inside the marked block:
+    // [AI_START_APP]
+    ...body replaced by your "content"...
+    // [AI_END_APP]
+  "content" is the complete new body of that block. Never include the marker lines.
+- The block must be one of the EDITABLE BLOCKS listed in the prompt: an undeclared
+  block is rejected and nothing is written.
+- Code outside the markers is not yours: it cannot be changed and any marker you
+  emit is rejected.
+- Unified diffs are NOT accepted.
 - Use "creates" only for files that do not exist yet.
 - Never use paths outside: src/, include/, drivers/, app/, tests/, boards/, scripts/,
   or the root files CMakeLists.txt, prj.conf, Kconfig, west.yml, README.md, .gitignore.
@@ -63,6 +74,8 @@ export function buildTurnPrompt(input: {
   buildResult?: BuildResult | null;
   attempt: number;
   previousPatches?: string[];
+  /** Block names the model may edit, from the product profile. */
+  anchors?: string[];
 }): string {
   const fileBlock = input.files
     .map((file) => `--- BEGIN ${file.path} ---\n${file.content}\n--- END ${file.path} ---`)
@@ -73,6 +86,7 @@ export function buildTurnPrompt(input: {
   sections.push(`RTOS: ${input.project.rtos}`);
   sections.push(`BOARD: ${input.project.board ?? "unspecified"}`);
   sections.push(`MCU: ${input.project.mcu ?? "unspecified"}`);
+  sections.push(`EDITABLE BLOCKS: ${input.anchors && input.anchors.length > 0 ? input.anchors.join(", ") : "(none)"}`);
   if (input.attempt > 1) {
     sections.push(`REPAIR ATTEMPT: ${input.attempt} of ${MAX_REPAIR_ATTEMPTS}`);
   }
@@ -178,38 +192,49 @@ export function parseAgentResponse(text: string): PlanParseResult {
     creates.push({ path: item.path, content: item.content });
   }
 
-  const patches: AgentPatch[] = [];
-  const rawPatches = Array.isArray(record.patches) ? record.patches : [];
-  for (const entry of rawPatches) {
+  const edits: AgentEdit[] = [];
+  const rawEdits = Array.isArray(record.edits) ? record.edits : [];
+  for (const entry of rawEdits) {
     if (typeof entry !== "object" || entry === null) continue;
     const item = entry as Record<string, unknown>;
-    if (typeof item.path !== "string") continue;
-    const diff =
-      typeof item.diff === "string"
-        ? item.diff
-        : typeof item.patch === "string"
-          ? item.patch
-          : null;
-    if (!diff) continue;
-    patches.push({ path: item.path, diff });
+    if (
+      typeof item.path !== "string" ||
+      typeof item.block !== "string" ||
+      typeof item.content !== "string"
+    ) {
+      continue;
+    }
+    edits.push({ path: item.path, block: item.block, content: item.content });
+  }
+
+  // Unified diffs were replaced by block edits: refuse them loudly instead of
+  // silently ignoring a plan the model thought it had sent.
+  const retiredPatches = Array.isArray(record.patches) ? record.patches : [];
+  if (retiredPatches.length > 0) {
+    return {
+      ok: false,
+      code: "LLM_BAD_RESPONSE",
+      reason:
+        'unified diffs are not accepted: edit an existing file with "edits" inside a [AI_START_<block>] marker',
+    };
   }
 
   const plan: AgentPlan = {
     summary,
     creates,
-    patches,
+    edits,
     requestBuild: record.requestBuild === undefined ? true : Boolean(record.requestBuild),
     answerOnly: Boolean(record.answerOnly),
   };
 
-  if (summary === "" && creates.length === 0 && patches.length === 0 && !plan.answerOnly) {
+  if (summary === "" && creates.length === 0 && edits.length === 0 && !plan.answerOnly) {
     return {
       ok: false,
       code: "PLAN_EMPTY",
-      reason: "the model answered with neither a summary, a create, a patch nor answerOnly",
+      reason: "the model answered with neither a summary, a create, an edit nor answerOnly",
     };
   }
-  if (!plan.answerOnly && creates.length === 0 && patches.length === 0) {
+  if (!plan.answerOnly && creates.length === 0 && edits.length === 0) {
     plan.answerOnly = true;
   }
 
@@ -220,8 +245,10 @@ export function describePlan(plan: AgentPlan): string {
   const parts: string[] = [];
   if (plan.creates.length > 0)
     parts.push(`${plan.creates.length} file(s) created: ${plan.creates.map((c) => c.path).join(", ")}`);
-  if (plan.patches.length > 0)
-    parts.push(`${plan.patches.length} patch(es): ${plan.patches.map((p) => p.path).join(", ")}`);
+  if (plan.edits.length > 0)
+    parts.push(
+      `${plan.edits.length} block edit(s): ${plan.edits.map((edit) => `${edit.path}#${edit.block}`).join(", ")}`,
+    );
   if (parts.length === 0) parts.push("no file change");
   return parts.join(" · ");
 }

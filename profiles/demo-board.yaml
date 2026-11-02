@@ -1,0 +1,35 @@
+# Profilo prodotto di ESEMPIO — tutti i valori sono fittizi.
+# Nessun nome di cliente, scheda reale o progetto reale compare qui.
+prodotto: DEMO-BOARD-01
+
+chip:
+  famiglia: stm32
+  flash_kb: 2048
+  ram_kb: 640
+
+build:
+  sistema: cmake
+  toolchain: arm-none-eabi-gcc
+  comando: "cmake --build build"
+
+flash:
+  tool: STM32_Programmer_CLI
+  interfaccia: swd
+
+debug:
+  gdb_server: st
+  access_port: 0
+
+# Blocchi modificabili: // [AI_START_APP] … // [AI_END_APP]
+ancore:
+  - APP
+  - LED
+
+criteri:
+  - seriale_contiene: "BOOT OK"
+  - log_non_contiene:
+      - HardFault
+      - ERROR
+  - test_su_target: pass
+
+tentativi_max: 3

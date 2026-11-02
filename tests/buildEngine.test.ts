@@ -304,7 +304,7 @@ describe("LLM client", () => {
     const server = Bun.serve({
       port: 0,
       fetch: async () =>
-        Response.json({ response: JSON.stringify({ summary: "ok", creates: [], patches: [] }) }),
+        Response.json({ response: JSON.stringify({ summary: "ok", creates: [], edits: [] }) }),
     });
     const config = resolveLlmConfig({
       LLM_PROVIDER: "ollama",

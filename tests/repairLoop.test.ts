@@ -7,6 +7,7 @@ import {
 } from "../agent/repairLoop";
 import type { TurnFile, TurnWrite } from "../agent/turn";
 import { isVerifiedSuccess, projectStatusFor } from "../core/buildStatus";
+import { dispatchBuild, notAvailableFromDispatch, resolveRunnerConfig } from "../core/buildDispatch";
 
 /**
  * These are the old Convex-cycle tests (agentCycle.test.ts) moved onto the
@@ -70,6 +71,11 @@ class MemoryStore implements RepairLoopPorts {
   }
 }
 
+/** These tests must never reach the network: only loopback is allowed. */
+function loopback(port: number): string {
+  return `http://127.0.0.1:${port}`;
+}
+
 function startLlm(answerFor: (call: number) => string) {
   let calls = 0;
   const server = Bun.serve({
@@ -80,7 +86,7 @@ function startLlm(answerFor: (call: number) => string) {
     },
   });
   return {
-    url: `http://127.0.0.1:${server.port}`,
+    url: loopback(server.port!),
     calls: () => calls,
     stop: () => server.stop(true),
   };
@@ -102,7 +108,7 @@ function startRunner(
     },
   });
   return {
-    url: `http://127.0.0.1:${server.port}`,
+    url: loopback(server.port!),
     attempts,
     stop: () => server.stop(true),
   };
@@ -138,7 +144,7 @@ const createPlan = (path: string) =>
   JSON.stringify({
     summary: `create ${path}`,
     creates: [{ path, content: "void init_all(void) {}\n" }],
-    patches: [],
+    edits: [],
     requestBuild: true,
   });
 
@@ -224,24 +230,12 @@ describe("repair loop — the model never fabricates code", () => {
     }
   });
 
-  test("a patch that does not apply is PATCH_FAILED and nothing is written", async () => {
+  test("an edit outside the declared blocks is PATCH_FAILED and nothing is written", async () => {
     const llm = startLlm(() =>
       JSON.stringify({
         summary: "edit main",
         creates: [],
-        patches: [
-          {
-            path: "src/main.c",
-            diff: [
-              "--- a/src/main.c",
-              "+++ b/src/main.c",
-              "@@ -1,3 +1,3 @@",
-              " int totally_different(void) {",
-              "+    init();",
-              " }",
-            ].join("\n"),
-          },
-        ],
+        edits: [{ path: "src/main.c", block: "NOPE", content: "void init(void) {}" }],
         requestBuild: true,
       }),
     );
@@ -253,6 +247,7 @@ describe("repair loop — the model never fabricates code", () => {
           project,
           files: store.files,
           userMessage: "change main",
+          anchors: ["APP"],
           env: envWith({ LLM_BASE_URL: llm.url }),
         },
         store,
@@ -442,7 +437,7 @@ describe("repair loop — build evidence and repair", () => {
       JSON.stringify({
         summary: "The LED is on PA5 on this board.",
         creates: [],
-        patches: [],
+        edits: [],
         requestBuild: false,
         answerOnly: true,
       }),
@@ -467,6 +462,59 @@ describe("repair loop — build evidence and repair", () => {
       expect(store.messages[store.messages.length - 1]?.content).toContain("PA5");
     } finally {
       llm.stop();
+    }
+  });
+
+  test("changes without a build are CHANGES_APPLIED and claim nothing", async () => {
+    const llm = startLlm(() =>
+      JSON.stringify({
+        summary: "add a comment-only helper",
+        creates: [{ path: "src/notes.c", content: "/* notes */\n" }],
+        edits: [],
+        requestBuild: false,
+      }),
+    );
+    const store = new MemoryStore(seedFiles());
+
+    try {
+      const result = await runRepairLoop(
+        {
+          project,
+          files: store.files,
+          userMessage: "add a notes file",
+          env: envWith({ LLM_BASE_URL: llm.url }),
+        },
+        store,
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.status).toBe("CHANGES_APPLIED");
+        expect(result.build).toBeNull();
+      }
+      expect(store.files.some((file) => file.path === "src/notes.c")).toBe(true);
+      expect(store.builds()).toHaveLength(0);
+      expect(store.status).toBe("unverified");
+    } finally {
+      llm.stop();
+    }
+  });
+
+  test("a standalone build with no runner is NOT_AVAILABLE, never fake evidence", async () => {
+    const dispatch = await dispatchBuild(resolveRunnerConfig({}), {
+      projectName: "demo",
+      rtos: "zephyr",
+      files: [],
+      attempt: 1,
+    });
+
+    expect(dispatch.ok).toBe(false);
+    if (!dispatch.ok) {
+      expect(dispatch.code).toBe("RUNNER_NOT_CONFIGURED");
+      const build = notAvailableFromDispatch(dispatch.code, dispatch.message, 1);
+      expect(build.verification).toBe("NOT_AVAILABLE");
+      expect(build.verdict).toBe("UNKNOWN");
+      expect(String(build.reason)).toContain("RUNNER_NOT_CONFIGURED");
     }
   });
 

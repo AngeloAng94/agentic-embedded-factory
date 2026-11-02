@@ -408,7 +408,7 @@ describe("agent wire protocol", () => {
       JSON.stringify({
         summary: "add an LED driver",
         creates: [{ path: "src/led.c", content: "void led_init(void){}\n" }],
-        patches: [{ path: "src/main.c", diff: "@@ -1,1 +1,1 @@\n-a\n+b" }],
+        edits: [{ path: "src/main.c", block: "APP", content: "int main(void) { return 0; }" }],
         requestBuild: true,
       }),
       "```",
@@ -418,7 +418,8 @@ describe("agent wire protocol", () => {
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.plan.creates).toHaveLength(1);
-      expect(parsed.plan.patches).toHaveLength(1);
+      expect(parsed.plan.edits).toHaveLength(1);
+      expect(parsed.plan.edits[0]?.block).toBe("APP");
       expect(parsed.plan.requestBuild).toBe(true);
       expect(describePlan(parsed.plan)).toContain("src/led.c");
     }
@@ -432,9 +433,23 @@ describe("agent wire protocol", () => {
     const brokenJson = parseAgentResponse("Here: {summary: 'x',}");
     expect(brokenJson.ok).toBe(false);
 
-    const emptyPlan = parseAgentResponse(JSON.stringify({ summary: "", creates: [], patches: [] }));
+    const emptyPlan = parseAgentResponse(JSON.stringify({ summary: "", creates: [], edits: [] }));
     expect(emptyPlan.ok).toBe(false);
     if (!emptyPlan.ok) expect(emptyPlan.code).toBe("PLAN_EMPTY");
+  });
+
+  test("refuses a retired unified-diff plan instead of ignoring it", () => {
+    const parsed = parseAgentResponse(
+      JSON.stringify({
+        summary: "edit main",
+        patches: [{ path: "src/main.c", diff: "@@ -1,1 +1,1 @@\n-a\n+b" }],
+      }),
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.code).toBe("LLM_BAD_RESPONSE");
+      expect(parsed.reason).toContain("unified diffs are not accepted");
+    }
   });
 
   test("answers with no operations are marked answerOnly", () => {
