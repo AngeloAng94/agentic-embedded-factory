@@ -22,8 +22,10 @@
  * address checks, not their substitute. A stripped ELF without sections is
  * NOT_AVAILABLE, never a guess from the file size.
  */
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
-  readElfImage,
+  parseElfImage,
   SHF_ALLOC,
   SHF_EXECINSTR,
   SHF_WRITE,
@@ -60,6 +62,8 @@ export interface VectorTableReport {
 
 export interface MemoryMapReport {
   artifact: string;
+  /** SHA-256 of the exact ELF bytes the checks were run against. */
+  sha256: string;
   elfClass: "ELF32" | "ELF64";
   entry: string;
   regions: MemoryRegionUsage[];
@@ -234,10 +238,23 @@ export function checkMemoryMap(
     return invalidRequest("memory_map_check needs the path of the built ELF");
   }
 
-  const parsed = readElfImage(options.artifactPath);
+  let fileBytes: Uint8Array;
+  try {
+    fileBytes = new Uint8Array(readFileSync(options.artifactPath));
+  } catch (error) {
+    return notAvailable(
+      `cannot check the memory map: cannot read ${options.artifactPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  const parsed = parseElfImage(fileBytes);
   if (!parsed.ok) {
     return notAvailable(`cannot check the memory map: ${parsed.reason}`);
   }
+  // Hash the exact bytes that were parsed, so the flash gate cannot be fooled
+  // by a file that changes between the ELF parse and the hash.
+  const sha256 = createHash("sha256").update(fileBytes).digest("hex");
   const image = parsed.image;
   const regions = profile.chip.regioni;
 
@@ -577,6 +594,7 @@ export function checkMemoryMap(
 
   return toolOk({
     artifact: options.artifactPath,
+    sha256,
     elfClass: image.class,
     entry: hex(image.entry),
     regions: regionUsage,

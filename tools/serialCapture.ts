@@ -53,6 +53,27 @@ export interface SerialCaptureResult {
   stoppedAt: number;
 }
 
+export type SerialCaptureState = "idle" | "running" | "stopped";
+
+/** Snapshot exposed by the MCP session before/after a capture. */
+export interface SerialCaptureStatus {
+  state: SerialCaptureState;
+  running: boolean;
+  verification: "REAL" | "SIMULATED";
+  startedAt: number | null;
+  stoppedAt: number | null;
+  events: SerialEvent[];
+  /** Events that happened before the capture started. */
+  missed: SerialEvent[];
+  /** Events that happened after the capture was stopped. */
+  afterStop: SerialEvent[];
+  /** Null while the capture is still running and no event was missed yet. */
+  complete: boolean | null;
+  reason: string | null;
+  /** Present after a successful stop. */
+  text: string | null;
+}
+
 async function drain(
   stream: ReadableStream<Uint8Array> | undefined,
   append: (text: string) => void,
@@ -160,15 +181,67 @@ export class SerialCaptureSession {
   private startOrder: number | null = null;
   private clock = 0;
   private stopped = false;
-  private verification: "REAL" | "SIMULATED" = "REAL";
+  private stoppedAt: number | null = null;
+  private stopOrder: number | null = null;
+  private stopResult: SerialCaptureResult | null = null;
+  private verification: "REAL" | "SIMULATED";
   private events: RecordedEvent[] = [];
 
   constructor(backend: SerialBackend) {
     this.backend = backend;
+    this.verification = backend.simulated ? "SIMULATED" : "REAL";
   }
 
   get running(): boolean {
     return this.handle !== null && !this.stopped;
+  }
+
+  /**
+   * Read-only snapshot for the MCP `serial_capture` status action. It reports
+   * whether every flash/reset was preceded by the capture; it does not close
+   * the capture or invent output.
+   */
+  getStatus(): SerialCaptureStatus {
+    const missed =
+      this.startOrder === null
+        ? []
+        : this.events
+            .filter((event) => event.order < this.startOrder!)
+            .map(({ kind, at }) => ({ kind, at }));
+    const afterStop =
+      this.stopOrder === null
+        ? []
+        : this.events
+            .filter((event) => event.order > this.stopOrder!)
+            .map(({ kind, at }) => ({ kind, at }));
+    const running = this.running;
+    const state: SerialCaptureState = running
+      ? "running"
+      : this.stopped
+        ? "stopped"
+        : "idle";
+    const complete =
+      this.stopResult?.complete ??
+      (this.startOrder === null ? null : missed.length > 0 ? false : this.running ? null : true);
+    return {
+      state,
+      running,
+      verification: this.verification,
+      startedAt: this.startedAt,
+      stoppedAt: this.stoppedAt,
+      events: this.events.map(({ kind, at }) => ({ kind, at })),
+      missed,
+      afterStop,
+      complete: afterStop.length > 0 ? false : complete,
+      reason:
+        afterStop.length > 0
+          ? `serial capture had already stopped before ${afterStop.map((event) => event.kind).join(", ")}; those events are not captured`
+          : (this.stopResult?.reason ??
+            (missed.length > 0
+              ? `serial capture started after ${missed.map((event) => event.kind).join(", ")}; the boot log before it is missing`
+              : null)),
+      text: this.stopResult?.text ?? null,
+    };
   }
 
   /** Must be called before the first flash or reset. */
@@ -202,6 +275,7 @@ export class SerialCaptureSession {
     }
     if (this.stopped) return invalidRequest("serial capture was already stopped");
     this.stopped = true;
+    this.stopOrder = ++this.clock;
 
     let text: string;
     try {
@@ -218,18 +292,18 @@ export class SerialCaptureSession {
     const reason = complete
       ? null
       : `serial capture started after ${missed.map((event) => event.kind).join(", ")}; the boot log before it is missing`;
+    const result: SerialCaptureResult = {
+      text,
+      complete,
+      reason,
+      missed,
+      events: this.events.map(({ kind, at }) => ({ kind, at })),
+      startedAt: this.startedAt,
+      stoppedAt,
+    };
+    this.stoppedAt = stoppedAt;
+    this.stopResult = result;
 
-    return toolOk(
-      {
-        text,
-        complete,
-        reason,
-        missed,
-        events: this.events.map(({ kind, at }) => ({ kind, at })),
-        startedAt: this.startedAt,
-        stoppedAt,
-      },
-      this.verification,
-    );
+    return toolOk(result, this.verification);
   }
 }

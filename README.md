@@ -8,18 +8,16 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 4 complete** (native tools: profile doctor with target checks,
-> build, flash, `read_state` with declared mode, GDB batch, serial capture
-> session, on-target test, region-based `memory_map_check` with Cortex-M vector
-> checks; CMake and Zephyr `west` build adapters). The orchestrator, the CLI, the
-> MCP server and the demo do not exist yet; see
-> [What is not here yet](#what-is-not-here-yet). Nothing in this README
+> **State: Phase 5 complete** (native tools plus a stdio MCP server with two
+> declared groups, a structured result envelope, serial-capture sessions, and a
+> tool-enforced flash gate). The orchestrator, the CLI and the demo do not exist
+> yet; see [What is not here yet](#what-is-not-here-yet). Nothing in this README
 > describes them as working.
 >
 > There is no board and no cross toolchain in the development environment: every
 > real tool answers `NOT_AVAILABLE` with the reason, and the hardware test is
-> skipped. That path is tested; the real one is not. Run it with a board using
-> the command below.
+> skipped. The MCP integration test uses an explicit SIMULATED mode and never
+> claims it ran on a board.
 
 ## Non-negotiable rules
 
@@ -33,7 +31,9 @@ that the agent **cannot claim anything it has not measured**.
 | `read_state` declares its mode: `stable` needs identical reads, `progressing` needs movement in the declared direction | `tools/readState.ts` |
 | A flash mismatch is a doctor FAIL and makes every later read unreliable (`read_state` refuses) | `tools/doctor.ts`, `tools/probe.ts`, `tools/readState.ts` |
 | A busy probe or a blocked/unreachable core is a FAIL; unknown is `NOT_AVAILABLE` with the reason | `tools/doctor.ts` |
-| Serial capture must start before flash/reset; a late capture is marked incomplete | `tools/serialCapture.ts` |
+| Serial capture must start before flash/reset; a late capture is marked incomplete; `status` reports the session and missed events | `tools/serialCapture.ts`, `tools/mcp/server.ts` |
+| `flash` refuses unless the current run record has a `memory_map_check` SUCCESS for the same ELF SHA-256 and the latest doctor did not mark the target unreliable | `tools/mcp/runState.ts`, `tools/mcp/server.ts` |
+| Every MCP response carries `verification`, `verdict`, `actor` and structured `evidence`; the read-only and side-effect groups are declared in the server instructions and annotations | `tools/mcp/server.ts` |
 | Every allocated section's VMA is inside a declared region of the right type, and every section with file bytes and an LMA has its LMA inside FLASH; a section copied to RAM is valid whatever its flags | `tools/memoryMap.ts`, `core/elfImage.ts` |
 | The Cortex-M vector table has an 8-byte-aligned initial SP in RAM (the inclusive region end is valid) and a Thumb reset handler in FLASH | `tools/memoryMap.ts` |
 | `chip.vettori`, when present, is a hex address inside a declared FLASH region | `core/profile.ts`, `tools/memoryMap.ts` |
@@ -48,8 +48,8 @@ that the agent **cannot claim anything it has not measured**.
 | Every job works on its own branch and a failure discards it | `core/vcs.ts`, `tools/gitVcs.ts` |
 
 Not yet implemented, and deliberately absent from the code: on-target observation
-wired into the loop, `ModelRuntime`, the CLI, MCP and the demo. The hardware
-tools exist but have never run on a board in this environment.
+wired into the loop, `ModelRuntime`, the CLI and the demo. The hardware tools
+exist but have never run on a board in this environment.
 
 ## Layout
 
@@ -72,16 +72,18 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
                readState.ts   stable | progressing, declared by the caller
                debug.ts       GDB batch with explicit commands
                serialCapture.ts  session started before flash/reset; detects late starts
-               memoryMap.ts   region VMA/LMA checks, vector table, entry point
+               memoryMap.ts   region VMA/LMA checks, vector table, entry point, SHA-256
                targetTest.ts  on-target test port; NOT_AVAILABLE until wired
                gitVcs.ts      real git implementation of VcsPort
+               mcp/           stdio MCP server, declared tool groups, run-state
+                              flash gate and structured result envelopes
                runner/        local HTTP runner (build / doctor / export / turn)
-                              and Zephyr verification. Transitional: Phase 5
-                              replaces it with MCP tools invoked in-process.
+                              and Zephyr verification. The Phase 5 MCP surface is
+                              separate and invoked over stdio.
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
                repairLoop.ts  the loop: build → compiler error → patch → rebuild
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         261 tests, 9 skipped without a board / toolchain / git opt-in
+tests/         266 tests, 9 skipped without a board / toolchain / git opt-in
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -93,9 +95,10 @@ purpose: see [legacy/README.md](legacy/README.md).
 ## Requirements
 
 Bun **>= 1.2.21**, the first release with `Bun.YAML`, used to parse profiles. The
-minimum is pinned in `package.json` under `engines`. Everything else is a dev
-dependency except the platform's `@vly-ai/integrations` scaffold: the bench code
-under `core/`, `tools/` and `agent/` imports only Bun and Node built-ins.
+minimum is pinned in `package.json` under `engines`. The MCP transport uses
+`@modelcontextprotocol/sdk` and `zod`; the bench code under `core/`, `tools/` and
+`agent/` otherwise imports only Bun and Node built-ins. The platform's
+`@vly-ai/integrations` scaffold remains available for other integrations.
 
 ## Chip regions
 
@@ -124,10 +127,11 @@ chip:
 
 ```bash
 bun install
-bun test                     # 252 pass, 9 skip (board / toolchain / git opt-in)
+bun test                     # 257 pass, 9 skip (board / toolchain / git opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
+bun run mcp                  # stdio MCP server with the default profile
 bun run doctor               # real toolchain probe; reports MISSING, never invents
 bun run runner:serve         # local build runner on 127.0.0.1:8790 (see tools/runner/README.md)
 
@@ -149,9 +153,57 @@ The agent-loop tests start a **local HTTP server** (`Bun.serve` on 127.0.0.1, po
 that speaks the Ollama/OpenAI-compatible shape: no network, no Ollama installed,
 deterministic. The only unreachable-provider case points at `127.0.0.1:1` on purpose.
 
-The runner needs `west`/`cmake`/`arm-none-eabi-gcc` on the machine. Without them
-every build answer is `NOT_AVAILABLE · UNKNOWN` with the reason, which is the
-intended behaviour.
+The runner and MCP server need `west`/`cmake`/`arm-none-eabi-gcc` on the machine.
+Without them every real build answer is `NOT_AVAILABLE · UNKNOWN` with the reason,
+which is the intended behaviour.
+
+## MCP server
+
+`bun run mcp` starts a stdio MCP server. It reads a profile with `--profile` (or
+`PY_BENCH_MCP_PROFILE`) and a project base directory with `--project-dir` (or
+`PY_BENCH_MCP_PROJECT_DIR`). The project directory defaults to the current
+working directory and the profile defaults to `profiles/demo-board.yaml` under it.
+
+The server declares two groups in its instructions and in every tool description:
+
+- **read-only**: `doctor`, `memory_map_check`, `read_state`, `serial_capture`,
+  `run_record`;
+- **side effects** (board or project writes): `build`, `flash`, `debug`,
+  `target_test`.
+
+Every tool answer is a structured envelope with `verification`, `verdict`,
+`actor`, `evidence`, the tool result and the current run record; text is a
+summary, never the only result. The working rules are repeated in each tool
+description: verify on the board before claiming, read twice with the declared
+mode, and check the memory map before flash.
+
+### The flash gate
+
+`flash` does not trust the caller. It hashes the exact ELF being flashed and
+requires a `memory_map_check` **SUCCESS** for the same SHA-256 in the current run
+record. A check on a different build, or a check followed by a newer failure for
+the same bytes, is refused with an explanation of what to run. If the latest
+`doctor` reported `target.readsReliable = false`, flash is refused until a later
+doctor run reports a reliable target. Only a successful flash records a `flash`
+event on the serial session.
+
+### Serial session
+
+`serial_capture` is one session per MCP server: `start`, `stop`, `status`.
+Starting it before `flash` or a reset is supported and is the intended order;
+`status` reports the events seen and whether the capture missed any. A late
+start is still a real capture, but `complete` is false and `missed` names the
+events that happened before it. Events that happen after `stop` are reported in
+`afterStop` and also make `complete` false.
+
+### MCP tests
+
+The integration test launches `bun run mcp` through the official MCP stdio client,
+lists all nine tools and calls every one at least once. It selects
+`PY_BENCH_MCP_SIMULATE=1`, an explicit test-only double: every tool that does not
+read real files stays `SIMULATED`, and the flash test still passes through the
+same SHA-256 gate. A normal run never selects this mode and never turns it into
+`REAL`.
 
 ## How the loop reports
 
@@ -193,7 +245,8 @@ words are read from `chip.vettori` when configured, otherwise from the
 The initial SP must be in RAM and 8-byte aligned; the inclusive end of a RAM
 region is a valid stack top, one byte past it is not. The reset handler must be
 in FLASH with bit 0 set. The ELF entry point is a secondary executable-section
-check.
+check. The report carries the SHA-256 of the exact bytes that were parsed; the
+MCP `flash` gate compares it with the ELF it is about to write.
 
 ## Legacy snapshot and the `embedfactory-v1` tag
 
@@ -204,10 +257,11 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phases 5–9 of the plan: MCP server, `ModelRuntime` orchestrator (Claude Agent
-SDK + the existing `core/llmClient.ts`), `py job` CLI, demo. The tools are not
-wired into the repair loop yet: the loop still emits no `RunRecord` (that is
-Phase 6), and none of the hardware tools has run against a real board here.
+Phases 6–9 of the plan: `ModelRuntime` orchestrator (Claude Agent SDK + the
+existing `core/llmClient.ts`), `py job` CLI and demo. The tools are not wired
+into the repair loop yet: the loop still emits no `RunRecord` (that is Phase 6),
+and none of the hardware tools has run against a real board here. The MCP run
+record is session-scoped and is not yet persisted as the Phase 6 run record.
 
 `memory_map_check` reports per-region usage only after the VMA/LMA checks; a
 stripped ELF with no section headers is `NOT_AVAILABLE`, not a guess from the

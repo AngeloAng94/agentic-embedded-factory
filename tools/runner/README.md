@@ -1,7 +1,9 @@
 # EmbedFactory local runner
 
-The runner is the **only** component that executes native toolchains. The web
-app (Convex) cannot run `west`/`cmake`, so a build is a job:
+The runner is the **HTTP** component that executes native toolchains for the web
+app. The stdio MCP server in `tools/mcp/` is the separate tool surface; this
+runner remains for HTTP clients. The web app (Convex) cannot run
+`west`/`cmake`, so a build is a job:
 
 ```
 WEB → Build Job → Runner (HTTP) → real Zephyr/FreeRTOS toolchain

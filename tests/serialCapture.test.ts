@@ -99,6 +99,46 @@ describe("serial capture session", () => {
     expect(second.ok).toBe(false);
     if (!second.ok) expect(second.code).toBe("INVALID_REQUEST");
   });
+
+  test("status reports a late start and keeps the missed event after stop", async () => {
+    const session = new SerialCaptureSession(fakeSerialBackend("BOOT OK\n"));
+    session.noteFlash();
+    expect(session.getStatus()).toMatchObject({
+      state: "idle",
+      complete: null,
+      missed: [],
+    });
+
+    expect(session.start().ok).toBe(true);
+    expect(session.getStatus()).toMatchObject({
+      state: "running",
+      complete: false,
+      missed: [{ kind: "flash" }],
+    });
+
+    const clean = new SerialCaptureSession(fakeSerialBackend());
+    expect(clean.start().ok).toBe(true);
+    expect(clean.getStatus()).toMatchObject({ state: "running", complete: null });
+
+    const stopped = await session.stop();
+    expect(stopped.ok).toBe(true);
+    if (stopped.ok) expect(stopped.value.complete).toBe(false);
+    expect(session.getStatus()).toMatchObject({
+      state: "stopped",
+      complete: false,
+      missed: [{ kind: "flash" }],
+    });
+
+    const stoppedBeforeFlash = new SerialCaptureSession(fakeSerialBackend());
+    expect(stoppedBeforeFlash.start().ok).toBe(true);
+    expect((await stoppedBeforeFlash.stop()).ok).toBe(true);
+    stoppedBeforeFlash.noteFlash();
+    expect(stoppedBeforeFlash.getStatus()).toMatchObject({
+      state: "stopped",
+      complete: false,
+      afterStop: [{ kind: "flash" }],
+    });
+  });
 });
 
 describe("serial backend", () => {
