@@ -8,10 +8,10 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 6 complete** (native tools, a stdio MCP server with two declared
-> groups, a structured result envelope, serial-capture sessions, a tool-enforced
-> flash gate, and a validated `RunRecord` emitted by the repair loop). The
-> orchestrator, the CLI and the demo do not exist yet; see
+> **State: Phase 6b complete** (the Phase 5 corrections, no implicit acceptance
+> criterion, and a `ModelRuntime` with the existing LLM client, Claude Agent SDK
+> and an explicitly marked fake test double). Phase 6c (orchestrator) and 6d
+> (branch/report/restore) do not exist yet; see
 > [What is not here yet](#what-is-not-here-yet). Nothing in this README describes
 > them as working.
 >
@@ -35,6 +35,8 @@ that the agent **cannot claim anything it has not measured**.
 | Serial capture must start before flash/reset; a late capture is marked incomplete; `status` reports the session and missed events | `tools/serialCapture.ts`, `tools/mcp/server.ts` |
 | `flash` refuses unless the current run record has a `memory_map_check` SUCCESS for the same ELF SHA-256 and the latest doctor did not mark the target unreliable | `tools/mcp/runState.ts`, `tools/mcp/server.ts` |
 | `flash` accepts an ELF, or a `.bin`/`.hex` only when the tool derived it from a checked ELF; the run record stores `sha256 ELF → sha256 bin/hex`, and an external binary without that derivation is refused | `tools/mcp/artifacts.ts`, `tools/mcp/runState.ts`, `tools/mcp/server.ts` |
+| A profile without acceptance criteria is valid: the run stops at `compiled`, the verdict stays `UNKNOWN`, and the reason is carried in the run report | `agent/repairLoop.ts`, `core/runRecord.ts`, `core/profile.ts` |
+| The generation provider is selected by the profile; the fake runtime is a marked test double that requires an explicit opt-in and never falls back to a real provider | `core/profile.ts`, `agent/modelRuntime.ts`, `agent/turn.ts` |
 | `debug` uses a GDB allowlist: breakpoints, halt/continue, RAM/register reads and writes, detach; `load`, `restore` into FLASH, programming monitors and OpenOCD/probe-rs flash commands are refused | `tools/debugPolicy.ts`, `tools/debug.ts`, `tools/mcp/server.ts` |
 | `target_test` that loads firmware passes through the same flash gate as `flash` | `tools/mcp/server.ts`, `tools/mcp/runState.ts` |
 | Every MCP response carries `verification`, `verdict`, `actor` and structured `evidence`; the read-only and side-effect groups are declared in the server instructions and annotations | `tools/mcp/server.ts` |
@@ -52,11 +54,12 @@ that the agent **cannot claim anything it has not measured**.
 | Existing files change only inside `// [AI_START_<block>]`, for blocks declared in the profile; one bad edit writes nothing | `core/blockPatch.ts`, `agent/turn.ts` |
 | Every job works on its own branch and a failure discards it | `core/vcs.ts`, `tools/gitVcs.ts` |
 | The repair loop emits a validated `RunRecord` through `recordRun`; its level and status are derived from the evidence, never from the model or the build alone | `agent/repairLoop.ts`, `core/runRecord.ts` |
+| A model answer is only a proposal: `runAgentTurn` passes it through the same validated-patch path regardless of whether the runtime is the LLM client, Claude Agent SDK or the fake double | `agent/turn.ts`, `agent/modelRuntime.ts` |
 
-Not yet implemented, and deliberately absent from the code: hardware tools wired
-into the repair loop, on-target observation produced by the loop, `ModelRuntime`,
-the CLI and the demo. The hardware tools exist but have never run on a board in
-this environment.
+Not yet implemented, and deliberately absent from the code: the orchestrator,
+hardware tools wired into the repair loop, on-target observation produced by the
+loop, branch/report/restore, the CLI and the demo. The hardware tools exist but
+have never run on a board in this environment.
 
 ## Layout
 
@@ -90,10 +93,12 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
                               and Zephyr verification. The MCP surface is separate
                               and invoked over stdio.
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
+               modelRuntime.ts  provider boundary: llmClient, Claude Agent SDK,
+                              explicit fake test double
                repairLoop.ts  the loop: build → compiler error → patch → rebuild;
                               emits the validated RunRecord through `recordRun`
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         281 tests: 272 pass, 9 skipped without a board / toolchain / git opt-in
+tests/         290 tests: 280 pass, 10 skipped without a board / toolchain / git / Claude key
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -107,8 +112,11 @@ purpose: see [legacy/README.md](legacy/README.md).
 Bun **>= 1.2.21**, the first release with `Bun.YAML`, used to parse profiles. The
 minimum is pinned in `package.json` under `engines`. The MCP transport uses
 `@modelcontextprotocol/sdk` and `zod`; the bench code under `core/`, `tools/` and
-`agent/` otherwise imports only Bun and Node built-ins. The platform's
-`@vly-ai/integrations` scaffold remains available for other integrations.
+`agent/` otherwise imports only Bun and Node built-ins. `@anthropic-ai/claude-agent-sdk`
+is the Claude runtime implementation and is imported lazily only when that
+provider is selected; its API key is `ANTHROPIC_API_KEY` in the process that runs
+the agent. The platform's `@vly-ai/integrations` scaffold remains available for
+other integrations.
 
 ## Chip regions
 
@@ -137,7 +145,7 @@ chip:
 
 ```bash
 bun install
-bun test                     # 272 pass, 9 skip (281 tests; board / toolchain / git opt-in)
+bun test                     # 280 pass, 10 skip (290 tests; board / toolchain / git / Claude key opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -242,15 +250,47 @@ one of `ANSWER_ONLY`, `CHANGES_APPLIED`, `SUCCESS`, `BUILD_NOT_AVAILABLE`, or a
 failure code such as `PATCH_FAILED`, `REPAIR_LIMIT_REACHED`,
 `TIME_BUDGET_EXHAUSTED`.
 
-Every outcome also carries `runRecord`: `{ record, level, status, simulated }`,
-where `record` is the validated `RunRecord` with the profile name, request,
-criteria, applied changes, model transcript and structured evidence. The loop records `written` evidence only after `applyWrites` persisted
-the files, and `compiled` evidence only from the final build result; evidence
-from a simulated run is `SIMULATED`. `recordRun` receives the record plus the
-level and status derived from it. The stored record contains no level or verdict:
+Every outcome also carries `runRecord`: `{ record, level, status, simulated,
+reason }`, where `record` is the validated `RunRecord` with the profile name,
+request, criteria, applied changes, model transcript and structured evidence.
+The loop records `written` evidence only after `applyWrites` persisted the
+files, and `compiled` evidence only from the final build result; evidence from a
+simulated run is `SIMULATED`. `recordRun` receives the record plus the level and
+status derived from it. The stored record contains no level or verdict:
 `validateRunRecord` rejects those fields. The adapter that stores project state
 still derives it from the recorded build (`isVerifiedSuccess` /
 `projectStatusFor`), never from the model's prose.
+
+There is no implicit `build` criterion. A request/profile with no criteria
+produces an empty criteria list; the record can reach at most `compiled`, the
+status is `UNKNOWN`, and `reason` states that no criterion was evaluated on the
+target. `reason` is derived from the record by `runRecordReason`, not written by
+the model.
+
+## Model runtime and profile selection
+
+`agent/modelRuntime.ts` is the provider boundary used by `agent/turn.ts`:
+
+- `llmClient` (default): the existing Ollama / OpenAI-compatible client;
+- `claude-agent-sdk`: one tool-free Claude Agent SDK turn, imported lazily;
+- `fake`: a test double, marked `fake: true` and `simulated: true`.
+
+The profile selects it, independently of the board facts:
+
+```yaml
+llm:
+  provider: llmClient   # llmClient | claude-agent-sdk | fake
+  model: llama3         # optional
+```
+
+`fake` is never a fallback. `createModelRuntime` refuses it without
+`allowFake: true`, and tests that need a scripted answer pass it explicitly. A
+fake answer still goes through the same validated-patch gate before any file is
+written.
+
+`ANTHROPIC_API_KEY` is required only when `claude-agent-sdk` is selected. The
+optional Agent SDK test is skipped when the key is absent; the adapter's
+missing-key path fails before importing or spawning the SDK.
 
 ## Target checks and capture order
 
@@ -292,11 +332,13 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phases 7–9 of the plan: `ModelRuntime` orchestrator (Claude Agent SDK + the
-existing `core/llmClient.ts`), `py job` CLI and demo. Phase 6 emits the validated
-`RunRecord`, but the hardware tools are not wired into the repair loop yet, and
-none of them has run against a real board here. The MCP run record remains
-session-scoped; it is not the persistent store for repair-loop records.
+Phase 6c (the orchestrator: serial start → build → memory_map_check → flash →
+observation → criteria evaluation) and 6d (one VCS branch per run, one commit per
+attempt, restore on failure, `report.md` and `known_issues.yaml`) do not exist
+yet. The hardware tools are not wired into the repair loop, and none of them has
+run against a real board here. The MCP run record remains session-scoped; it is
+not the persistent store for repair-loop records. Phases 7–9 (the `py job` CLI
+and demo) are also absent.
 
 `memory_map_check` reports per-region usage only after the VMA/LMA checks; a
 stripped ELF with no section headers is `NOT_AVAILABLE`, not a guess from the

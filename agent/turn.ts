@@ -28,9 +28,10 @@ import {
   type KbDocument,
   type RetrievalResult,
 } from "../core/knowledge";
-import { LLM_UNAVAILABLE_MESSAGE, callLlm, resolveLlmConfig } from "../core/llmClient";
+import { LLM_UNAVAILABLE_MESSAGE } from "../core/llmClient";
 import { analyzeProject } from "../core/safety";
 import type { BuildResult } from "../core/types";
+import { LlmClientRuntime, type ModelRuntime } from "./modelRuntime";
 
 export interface TurnFile {
   path: string;
@@ -62,6 +63,8 @@ export interface TurnRequest {
   buildResult?: BuildResult | null;
   attempt?: number;
   env?: Record<string, string | undefined>;
+  /** Injected by the caller; absent keeps the existing LLM client. */
+  modelRuntime?: ModelRuntime;
 }
 
 export type TurnOutcome =
@@ -76,7 +79,14 @@ export type TurnOutcome =
       knowledgeLog: string;
       /** Same retrieval the prompt was built from, for the run record. */
       retrieval: RetrievalResult;
-      llm: { model: string; attempts: number; durationMs: number; endpoint: string };
+      llm: {
+        provider: string;
+        model: string;
+        attempts: number;
+        durationMs: number;
+        endpoint: string | null;
+        fake: boolean;
+      };
       safety: ReturnType<typeof analyzeProject>;
     }
   | {
@@ -87,6 +97,9 @@ export type TurnOutcome =
         | "LLM_TIMEOUT"
         | "LLM_HTTP_ERROR"
         | "LLM_EMPTY_RESPONSE"
+        | "MODEL_RUNTIME_UNAVAILABLE"
+        | "MODEL_RUNTIME_FAKE_DISABLED"
+        | "MODEL_RUNTIME_ERROR"
         | "LLM_BAD_RESPONSE"
         | "PLAN_EMPTY"
         | "PATCH_FAILED";
@@ -104,17 +117,7 @@ export async function runAgentTurn(request: TurnRequest): Promise<TurnOutcome> {
     userRequest: request.userMessage,
   });
 
-  const llmConfig = resolveLlmConfig(env);
-  if (!llmConfig.ok) {
-    return {
-      ok: false,
-      code: "LLM_NOT_CONFIGURED",
-      message: llmConfig.reason,
-      knowledgeLog: retrieval.log,
-      retrieval,
-    };
-  }
-
+  const runtime = request.modelRuntime ?? new LlmClientRuntime({ env });
   const attempt = request.attempt ?? 1;
   const prompt = buildTurnPrompt({
     project: {
@@ -131,13 +134,16 @@ export async function runAgentTurn(request: TurnRequest): Promise<TurnOutcome> {
     anchors: request.anchors ?? [],
   });
 
-  const llm = await callLlm(llmConfig.config, `${AGENT_SYSTEM_PROMPT}\n\n${prompt}`);
+  const llm = await runtime.generate({
+    system: AGENT_SYSTEM_PROMPT,
+    prompt,
+  });
   if (!llm.ok) {
     return {
       ok: false,
       code: llm.code,
       message: `${LLM_UNAVAILABLE_MESSAGE}\n\nCode: ${llm.code}\nProvider: ${
-        llm.endpoint ?? "n/a"
+        llm.endpoint ?? runtime.provider
       }\nReason: ${llm.message}`,
       knowledgeLog: retrieval.log,
       retrieval,
@@ -271,10 +277,12 @@ export async function runAgentTurn(request: TurnRequest): Promise<TurnOutcome> {
     knowledgeLog: retrieval.log,
     retrieval,
     llm: {
+      provider: llm.provider,
       model: llm.model,
       attempts: llm.attempts,
       durationMs: llm.durationMs,
       endpoint: llm.endpoint,
+      fake: llm.fake,
     },
     safety,
   };

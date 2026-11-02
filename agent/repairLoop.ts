@@ -24,6 +24,7 @@ import {
 } from "../core/buildDispatch";
 import {
   finalizeRunRecord,
+  runRecordReason,
   type DerivedRunRecord,
   type RunChange,
   type RunCriterion,
@@ -32,6 +33,7 @@ import { capSimulationLevel, deriveStatus, type Evidence } from "../core/verific
 import type { KbDocument } from "../core/knowledge";
 import { formatSafetyReport } from "../core/safety";
 import type { BuildResult } from "../core/types";
+import type { ModelRuntime } from "./modelRuntime";
 import { runAgentTurn, type TurnFile, type TurnOutcome, type TurnWrite } from "./turn";
 
 /** Same budget the Convex action used: one job must not hang forever. */
@@ -57,6 +59,11 @@ export type RepairRunRecord =
 export interface RepairRunRecorded extends DerivedRunRecord {
   /** True only when this run was explicitly simulated. */
   simulated: boolean;
+  /**
+   * Why the derived status is what it is. Computed from the record, never
+   * accepted from the model; the future report uses this instead of prose.
+   */
+  reason: string;
 }
 
 export interface RepairLoopPorts {
@@ -104,9 +111,12 @@ export interface RepairLoopRequest {
   log?: (line: string) => void;
   /** Product profile name and criteria, written into the run record. */
   profile?: string;
+  /** Empty/absent is a real state: no criterion can reach `observed`. */
   criteria?: RunCriterion[];
   branch?: string | null;
   runId?: string;
+  /** Selected from the profile by the orchestrator; absent uses llmClient. */
+  modelRuntime?: ModelRuntime;
   /** Explicit demo/test simulation: evidence stays SIMULATED and level is capped. */
   simulated?: boolean;
 }
@@ -185,10 +195,7 @@ export async function runRepairLoop(
       criterion: null,
     });
   }
-  const criteria =
-    request.criteria && request.criteria.length > 0
-      ? request.criteria.map((criterion) => ({ ...criterion }))
-      : [{ id: "build", description: "the project builds with the real toolchain" }];
+  const criteria = request.criteria?.map((criterion) => ({ ...criterion })) ?? [];
   const derived = finalizeRunRecord({
     id: request.runId ?? `run-${startedAt}`,
     createdAt: startedAt,
@@ -207,6 +214,7 @@ export async function runRepairLoop(
     level,
     status,
     simulated: accumulator.simulated,
+    reason: runRecordReason(derived.record, level, status),
   };
   await ports.recordRun?.(runRecord);
   return { ...outcome, runRecord };
@@ -262,6 +270,7 @@ async function runRepairLoopInternal(
       buildResult: attempt > 1 ? buildResult : (request.previousBuild ?? null),
       attempt,
       env,
+      modelRuntime: request.modelRuntime,
     });
 
     knowledge = turn.retrieval.log;

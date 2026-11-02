@@ -258,12 +258,38 @@ describe("product profile", () => {
     );
   });
 
-  test("rejects an empty criteria list", () => {
+  test("accepts an empty criteria list: no criterion can reach observed", () => {
     const text = BASE.replace(
       "criteri:\n  - seriale_contiene: \"BOOT OK\"\n  - log_non_contiene: [HardFault, ERROR]\n  - test_su_target: pass",
       "criteri: []",
     );
-    expect(errorsOf(text)).toContain("criteri");
+    const result = loadProfile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.profile.criteri).toEqual([]);
+  });
+
+  test("accepts omitted criteria and an optional model runtime", () => {
+    const withoutCriteria = BASE.replace(
+      "criteri:\n  - seriale_contiene: \"BOOT OK\"\n  - log_non_contiene: [HardFault, ERROR]\n  - test_su_target: pass\n",
+      "",
+    );
+    const result = loadProfile(`${withoutCriteria}llm: { provider: llmClient }\n`);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.profile.criteri).toEqual([]);
+      expect(result.profile.llm).toEqual({ provider: "llmClient" });
+    }
+  });
+
+  test("validates the model runtime provider and model", () => {
+    const fake = loadProfile(`${BASE}llm: { provider: fake, model: test-model }`);
+    expect(fake.ok).toBe(true);
+    if (fake.ok) expect(fake.profile.llm).toEqual({ provider: "fake", model: "test-model" });
+
+    expect(errorsOf(`${BASE}llm: { provider: openai }`)).toContain("llm.provider");
+    expect(errorsOf(`${BASE}llm: { provider: llmClient, extra: true }`)).toContain(
+      "llm.extra: unknown field",
+    );
   });
 
   test("rejects attempts outside 1..10", () => {

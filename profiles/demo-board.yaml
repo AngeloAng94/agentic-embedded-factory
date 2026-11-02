@@ -22,6 +22,10 @@ debug:
   gdb_server: st
   access_port: 0
 
+# Fornitore del modello: llmClient (Ollama/OpenAI), claude-agent-sdk o fake.
+llm:
+  provider: llmClient
+
 # Blocchi modificabili: // [AI_START_APP] … // [AI_END_APP]
 ancore:
   - APP

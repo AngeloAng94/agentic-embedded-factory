@@ -13,6 +13,15 @@ export type BuildSystem = "cmake" | "zephyr-west";
 export type FlashInterface = "swd" | "jtag";
 export type FlashTool = "STM32_Programmer_CLI" | "openocd" | "probe-rs" | "west";
 
+/** Generation backends. `fake` is test-only and must be opted into. */
+export type ModelRuntimeProvider = "llmClient" | "claude-agent-sdk" | "fake";
+
+export interface ModelConfig {
+  provider: ModelRuntimeProvider;
+  /** Optional model name passed to the selected runtime. */
+  model?: string;
+}
+
 export type Criterion =
   | { seriale_contiene: string }
   | { log_non_contiene: string[] }
@@ -50,8 +59,11 @@ export interface ProductProfile {
   flash: { tool: FlashTool; interfaccia: FlashInterface; target?: string };
   debug: { gdb_server: string; access_port: number };
   seriale?: SerialConfig;
+  /** Optional generation backend; absent means the existing `llmClient`. */
+  llm?: ModelConfig;
   /** Editable block names: `// [AI_START_<name>]` … `// [AI_END_<name>]`. */
   ancore: string[];
+  /** Empty is valid: without criteria the run can never reach `observed`. */
   criteri: Criterion[];
   tentativi_max: number;
 }
@@ -68,6 +80,7 @@ const TOP_KEYS = new Set([
   "flash",
   "debug",
   "seriale",
+  "llm",
   "ancore",
   "criteri",
   "tentativi_max",
@@ -75,6 +88,7 @@ const TOP_KEYS = new Set([
 const BUILD_SYSTEMS: BuildSystem[] = ["cmake", "zephyr-west"];
 const FLASH_INTERFACES: FlashInterface[] = ["swd", "jtag"];
 const FLASH_TOOLS: FlashTool[] = ["STM32_Programmer_CLI", "openocd", "probe-rs", "west"];
+const MODEL_PROVIDERS: ModelRuntimeProvider[] = ["llmClient", "claude-agent-sdk", "fake"];
 const ANCHOR_RE = /^[A-Z][A-Z0-9_]*$/;
 const MAX_ATTEMPTS = 10;
 const MAX_ADDRESS = 0xffff_ffff;
@@ -393,6 +407,26 @@ export function loadProfile(text: string): ProfileResult {
     }
   }
 
+  let llm: ModelConfig | undefined;
+  if (parsed.llm !== undefined) {
+    if (!isObject(parsed.llm)) {
+      errors.push("llm: must be an object");
+    } else {
+      checkKeys(parsed.llm, ["provider", "model"], "llm", errors);
+      const provider = stringAt(parsed.llm.provider, "llm.provider", errors);
+      if (provider !== null && !MODEL_PROVIDERS.includes(provider as ModelRuntimeProvider)) {
+        errors.push(`llm.provider: must be one of ${MODEL_PROVIDERS.join(", ")}`);
+      }
+      const model =
+        parsed.llm.model === undefined
+          ? undefined
+          : (stringAt(parsed.llm.model, "llm.model", errors) ?? undefined);
+      if (provider !== null && MODEL_PROVIDERS.includes(provider as ModelRuntimeProvider)) {
+        llm = { provider: provider as ModelRuntimeProvider, ...(model === undefined ? {} : { model }) };
+      }
+    }
+  }
+
   const ancore: string[] = [];
   if (!Array.isArray(parsed.ancore) || parsed.ancore.length === 0) {
     errors.push("ancore: must be a non-empty array of block names");
@@ -413,13 +447,15 @@ export function loadProfile(text: string): ProfileResult {
   }
 
   const criteri: Criterion[] = [];
-  if (!Array.isArray(parsed.criteri) || parsed.criteri.length === 0) {
-    errors.push("criteri: must be a non-empty array");
-  } else {
-    parsed.criteri.forEach((entry, index) => {
-      const criterion = parseCriterion(entry, index, errors);
-      if (criterion) criteri.push(criterion);
-    });
+  if (parsed.criteri !== undefined) {
+    if (!Array.isArray(parsed.criteri)) {
+      errors.push("criteri: must be an array");
+    } else {
+      parsed.criteri.forEach((entry, index) => {
+        const criterion = parseCriterion(entry, index, errors);
+        if (criterion) criteri.push(criterion);
+      });
+    }
   }
 
   const tentativi = integerAt(parsed.tentativi_max, "tentativi_max", errors, 1, MAX_ATTEMPTS);
@@ -435,6 +471,7 @@ export function loadProfile(text: string): ProfileResult {
       flash: flash!,
       debug: debug!,
       seriale,
+      llm,
       ancore,
       criteri,
       tentativi_max: tentativi!,

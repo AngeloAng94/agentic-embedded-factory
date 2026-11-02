@@ -151,8 +151,8 @@ export function validateRunRecord(
   }
 
   const criteria: RunCriterion[] = [];
-  if (!Array.isArray(raw.criteria) || raw.criteria.length === 0) {
-    errors.push("criteria: must be a non-empty array");
+  if (!Array.isArray(raw.criteria)) {
+    errors.push("criteria: must be an array");
   } else {
     const seen = new Set<string>();
     raw.criteria.forEach((entry, index) => {
@@ -234,6 +234,35 @@ export function validateRunRecord(
       deriveLevel(evidence, criteria.map((criterion) => criterion.id)),
     ),
   };
+}
+
+/**
+ * Human-readable reason for the derived outcome, used by the report. It is a
+ * function of the record, never a claim supplied by the model.
+ */
+export function runRecordReason(
+  record: RunRecord,
+  level: VerificationLevel | null,
+  status: Verdict,
+): string {
+  const noCriteria =
+    "No acceptance criteria are declared in the profile; with no criteria, no criterion can be evaluated " +
+    "on the target, so the maximum reachable level is compiled.";
+  if (status === "FAILURE") {
+    return record.criteria.length === 0
+      ? `At least one evidence entry reports FAILURE; this run is not a successful result. ${noCriteria}`
+      : "At least one evidence entry reports FAILURE; this run is not a successful result.";
+  }
+  if (record.criteria.length === 0) {
+    return `${noCriteria} The verdict remains UNKNOWN because no criterion was evaluated on the target.`;
+  }
+  if (level === "observed" || level === "confirmed") {
+    return `Every declared criterion has REAL, passing evidence; the run reached ${level}.`;
+  }
+  if (level === null) {
+    return "No REAL, successful evidence exists yet; the verdict remains UNKNOWN.";
+  }
+  return `Only ${level} is proven; the declared criteria have not all been evaluated on the target, so the verdict remains UNKNOWN.`;
 }
 
 /** Builds a record from trusted inputs, deriving level/status on the spot. */

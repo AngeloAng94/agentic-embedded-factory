@@ -360,6 +360,35 @@ describe("repair loop — build evidence and repair", () => {
     }
   });
 
+  test("no profile criteria: compiled at most, UNKNOWN, and a stated reason", async () => {
+    const llm = startLlm(() => createPlan("src/no_criteria.c"));
+    const runner = startRunner(() => realSuccess());
+    const store = new MemoryStore(seedFiles());
+
+    try {
+      const result = await runRepairLoop(
+        {
+          project,
+          files: store.files,
+          userMessage: "build without a profile criterion",
+          env: envWith({ LLM_BASE_URL: llm.url, BUILD_RUNNER_URL: runner.url }),
+        },
+        store,
+      );
+
+      expect(result.ok).toBe(true);
+      const recorded = store.runRecords[0]!;
+      expect(result.runRecord.record.criteria).toEqual([]);
+      expect(recorded.level).toBe("compiled");
+      expect(recorded.status).toBe("UNKNOWN");
+      expect(recorded.reason).toContain("No acceptance criteria are declared");
+      expect(validateRunRecord(recorded.record).ok).toBe(true);
+    } finally {
+      llm.stop();
+      runner.stop();
+    }
+  });
+
   test("an explicit simulation never records a REAL level", async () => {
     const llm = startLlm(() => createPlan("src/simulated.c"));
     const runner = startRunner(() => realSuccess());

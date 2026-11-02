@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { finalizeRunRecord, validateRunRecord } from "../core/runRecord";
+import { finalizeRunRecord, runRecordReason, validateRunRecord } from "../core/runRecord";
 import type { Evidence } from "../core/verificationLevels";
 
 const CRITERIA = [
@@ -120,12 +120,35 @@ describe("run record", () => {
     if (!result.ok) expect(result.errors.join(" ")).toContain("required on observed evidence");
   });
 
-  test("criteria are required and their ids unique", () => {
-    const missing = validateRunRecord({ ...record, criteria: [] });
-    expect(missing.ok).toBe(false);
+  test("criteria may be empty, but their ids must be unique", () => {
+    const empty = validateRunRecord({ ...record, criteria: [] });
+    expect(empty.ok).toBe(true);
+    if (empty.ok) {
+      expect(empty.level).toBe("compiled");
+      expect(empty.status).toBe("UNKNOWN");
+    }
     const duplicated = validateRunRecord({ ...record, criteria: [CRITERIA[0], CRITERIA[0]] });
     expect(duplicated.ok).toBe(false);
     if (!duplicated.ok) expect(duplicated.errors.join(" ")).toContain("duplicate");
+  });
+
+  test("a profile without criteria explains why it cannot go above compiled", () => {
+    const derived = finalizeRunRecord({
+      id: "run-empty-criteria",
+      createdAt: 1,
+      profile: "NO-CRITERIA",
+      request: "build only",
+      branch: null,
+      criteria: [],
+      changes: [],
+      evidence: EVIDENCE,
+    });
+
+    expect(derived.level).toBe("compiled");
+    expect(derived.status).toBe("UNKNOWN");
+    expect(runRecordReason(derived.record, derived.level, derived.status)).toContain(
+      "No acceptance criteria are declared",
+    );
   });
 
   test("a block edit without a block name is invalid", () => {
