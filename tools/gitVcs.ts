@@ -44,9 +44,9 @@ export class GitVcs implements VcsPort {
     this.baseRef = base;
   }
 
-  async commit(message: string): Promise<string> {
+  async commit(message: string, options: { allowEmpty?: boolean } = {}): Promise<string> {
     this.run(["add", "-A"]);
-    this.run(["commit", "-m", message]);
+    this.run(["commit", "-m", message, ...(options.allowEmpty ? ["--allow-empty"] : [])]);
     return this.run(["rev-parse", "HEAD"]).stdout.trim();
   }
 

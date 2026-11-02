@@ -82,7 +82,7 @@ export interface ProductProfile {
 }
 
 export type ProfileResult =
-  | { ok: true; profile: ProductProfile }
+  | { ok: true; profile: ProductProfile; warnings: string[] }
   | { ok: false; errors: string[] };
 
 const TOP_KEYS = new Set([
@@ -501,8 +501,18 @@ export function loadProfile(text: string): ProfileResult {
   const tentativi = integerAt(parsed.tentativi_max, "tentativi_max", errors, 1, MAX_ATTEMPTS);
 
   if (errors.length > 0) return { ok: false, errors };
+
+  const warnings: string[] = [];
+  if (budget.flash_max < tentativi!) {
+    warnings.push(
+      `warning: budget.flash_max (${budget.flash_max}) is lower than tentativi_max (${tentativi}); ` +
+        `the run can flash at most ${budget.flash_max} time(s) across ${tentativi} attempts`,
+    );
+  }
+
   return {
     ok: true,
+    warnings,
     profile: {
       prodotto: prodotto!,
       board,

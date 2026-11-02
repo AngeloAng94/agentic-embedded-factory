@@ -1,5 +1,5 @@
 /**
- * Phase 6c orchestrator: the complete, measured cycle.
+ * Phase 6c/6d orchestrator: the complete, measured cycle on a run branch.
  *
  *   serial start → build → memory_map_check → flash gate → flash → observation
  *   → acceptance criteria → RunRecord/report
@@ -46,13 +46,26 @@ import {
 } from "../tools/serialCapture";
 import { runTargetTest } from "../tools/targetTest";
 import type { KbDocument } from "../core/knowledge";
+import type { VcsPort } from "../core/vcs";
+import {
+  failedRunHint,
+  mergeKnownIssues,
+  type KnownIssue,
+} from "../core/knownIssues";
 import { createModelRuntimeFromProfile, type ModelRuntime } from "./modelRuntime";
 import { runAgentTurn, type TurnFile, type TurnWrite } from "./turn";
+import {
+  loadKnownIssuesFile,
+  runArtifactPaths,
+  RunSession,
+  writeRunArtifacts,
+  type AttemptCommit,
+  type WriteTextFile,
+} from "./runSession";
 import {
   deterministicRepair,
   matchKnownIssues,
   parseCompilerDiagnostics,
-  type KnownIssue,
 } from "./deterministicRepair";
 import {
   criterionOutcomesFromRecord,
@@ -101,6 +114,8 @@ export interface OrchestratorPorts {
   }): Promise<TurnFile[]> | TurnFile[];
   recordRun?(run: RepairRunRecorded): Promise<void> | void;
   say?(content: string, meta?: unknown): Promise<void> | void;
+  /** Test seam for the generated report.md / known_issues.yaml. */
+  writeFile?: WriteTextFile;
 }
 
 export interface OrchestratorRequest {
@@ -116,8 +131,15 @@ export interface OrchestratorRequest {
   modelRuntime?: ModelRuntime;
   /** Environment for provider/serial selection in tests. */
   env?: Record<string, string | undefined>;
-  /** Exact-text known issues to put in the model context. */
+  /** Exact-text known issues. Absent means load `knownIssuesPath` when present. */
   knownIssues?: KnownIssue[];
+  /** Optional VCS boundary: a run gets its own branch and one commit per attempt. */
+  vcs?: VcsPort;
+  /** Explicit run session, useful when the caller already owns the branch. */
+  session?: RunSession;
+  /** Generated artifacts; defaults to `<projectDir>/report.md` and `<projectDir>/known_issues.yaml`. */
+  reportPath?: string | null;
+  knownIssuesPath?: string | null;
   branch?: string | null;
   runId?: string;
   maxAttempts?: number;
@@ -147,6 +169,8 @@ export type OrchestratorCode =
   | "TIME_BUDGET_EXCEEDED"
   | "REPAIR_LIMIT_REACHED"
   | "MODEL_FAILED"
+  | "VCS_FAILED"
+  | "ARTIFACTS_FAILED"
   | "INTERNAL_ERROR";
 
 export interface OrchestratorResult {
@@ -163,6 +187,18 @@ export interface OrchestratorResult {
   serialStatus: SerialCaptureStatus;
   attempts: number;
   flashes: number;
+  branch: string | null;
+  baseBranch: string | null;
+  commits: AttemptCommit[];
+  reportPath: string;
+  knownIssuesPath: string;
+}
+
+class WorkspaceSetupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceSetupError";
+  }
 }
 
 function cloneFiles(files: readonly TurnFile[]): TurnFile[] {
@@ -301,8 +337,8 @@ function knownIssuesContext(
 }
 
 /**
- * Runs the Phase 6c cycle. It stops at the first unproven step and still emits
- * a complete RunRecord: a missing tool never becomes a success.
+ * Runs the Phase 6c/6d cycle. It stops at the first unproven step and still
+ * emits a complete RunRecord: a missing tool never becomes a success.
  */
 export async function runOrchestrator(
   request: OrchestratorRequest,
@@ -313,6 +349,22 @@ export async function runOrchestrator(
   const now = request.now ?? Date.now;
   const log = request.log ?? (() => {});
   const startedAt = now();
+  const runId = request.runId ?? `run-${startedAt}`;
+  const artifactPaths = runArtifactPaths(projectDir, {
+    reportPath: request.reportPath,
+    knownIssuesPath: request.knownIssuesPath,
+  });
+  const loadedKnownIssues = request.knownIssues
+    ? { issues: request.knownIssues.map((issue) => ({ ...issue })), warning: null }
+    : loadKnownIssuesFile(artifactPaths.knownIssuesPath);
+  let knownIssues: KnownIssue[] = loadedKnownIssues.issues;
+  if (loadedKnownIssues.warning) log(`[orchestrator] ${loadedKnownIssues.warning}`);
+  const session =
+    request.session ??
+    (request.vcs
+      ? new RunSession({ vcs: request.vcs, runId, branchName: request.branch })
+      : null);
+  let sessionStarted = session?.branch !== null && session?.branch !== undefined;
   const budget = profile.budget ?? {
     tempo_totale_ms: DEFAULT_RUN_TIME_BUDGET_MS,
     flash_max: DEFAULT_RUN_FLASH_BUDGET,
@@ -391,6 +443,27 @@ export async function runOrchestrator(
     return next;
   };
 
+  const commitAttempt = async (
+    attempt: number,
+    buildResult: BuildResult | null,
+    summary: string,
+  ): Promise<boolean> => {
+    if (!session) return true;
+    const status = buildResult
+      ? `${buildResult.verification} ${buildResult.verdict}`
+      : "attempt result";
+    const result = await session.commitAttempt(
+      attempt,
+      summary ? `${status}: ${summary}` : status,
+    );
+    if (!result.ok) {
+      stopReason = result.reason;
+      code = "VCS_FAILED";
+      return false;
+    }
+    return true;
+  };
+
   const getRuntime = (): ModelRuntime | null => {
     if (modelRuntime) return modelRuntime;
     const selected = createModelRuntimeFromProfile(profile, { env: request.env });
@@ -404,6 +477,11 @@ export async function runOrchestrator(
   };
 
   try {
+    if (session && !sessionStarted) {
+      const begun = await session.begin();
+      if (!begun.ok) throw new WorkspaceSetupError(begun.reason);
+      sessionStarted = true;
+    }
     if (!serialStarted) {
       const started = serial.start();
       if (!started.ok) {
@@ -453,12 +531,14 @@ export async function runOrchestrator(
       artifact = built.artifactPath ? path.resolve(projectDir, built.artifactPath) : null;
       if (build.verification === "REAL" && build.verdict === "SUCCESS" && artifact) {
         buildSucceeded = true;
+        if (!(await commitAttempt(attempt, build, "build succeeded"))) break;
         break;
       }
 
       if (build.verification !== "REAL") {
         stopReason = `build is ${build.verification}: ${build.reason ?? "no real compiler result"}`;
         code = "BUILD_NOT_AVAILABLE";
+        await commitAttempt(attempt, build, "build not available");
         break;
       }
 
@@ -466,6 +546,7 @@ export async function runOrchestrator(
         build = { ...build, verdict: "UNKNOWN", reason: "the build succeeded but produced no ELF artifact" };
         stopReason = build.reason!;
         code = "NO_ARTIFACT";
+        await commitAttempt(attempt, build, "no ELF artifact");
         break;
       }
 
@@ -495,6 +576,7 @@ export async function runOrchestrator(
               attemptedSymbols.push(fix.diagnostic.name);
             }
             modelText = fix.reason;
+            if (!(await commitAttempt(attempt, build, fix.reason))) break;
             continue;
           }
           parserReason = fix.reason;
@@ -509,18 +591,23 @@ export async function runOrchestrator(
       if (attempt >= maxAttempts) {
         stopReason = `repair limit reached after ${attempt} build attempt(s)`;
         code = "REPAIR_LIMIT_REACHED";
+        await commitAttempt(attempt, build, "repair limit reached");
         break;
       }
       if (timeExceeded()) {
         stopReason = budgetReason();
         code = "TIME_BUDGET_EXCEEDED";
+        await commitAttempt(attempt, build, "time budget exceeded");
         break;
       }
 
       const runtime = getRuntime();
-      if (!runtime) break;
+      if (!runtime) {
+        await commitAttempt(attempt, build, "model runtime unavailable");
+        break;
+      }
 
-      const known = knownIssuesContext(errorText, request.knownIssues);
+      const known = knownIssuesContext(errorText, knownIssues);
       const repairContext = [parserReason, known].filter((entry): entry is string => Boolean(entry)).join("\n\n");
       const turn = await runAgentTurn({
         projectName: request.project.name,
@@ -540,15 +627,18 @@ export async function runOrchestrator(
       if (!turn.ok) {
         stopReason = `${turn.code}: ${turn.message}`;
         code = "MODEL_FAILED";
+        await commitAttempt(attempt, build, "model failed");
         break;
       }
       modelText = turn.summary;
       if (turn.writes.length === 0) {
         stopReason = "the model returned no validated patch to rebuild";
         code = "MODEL_FAILED";
+        await commitAttempt(attempt, build, "model returned no patch");
         break;
       }
       files = await applyWrites(turn.writes, attempt, turn.summary);
+      if (!(await commitAttempt(attempt, build, turn.summary))) break;
     }
 
     if (!buildSucceeded) {
@@ -583,7 +673,7 @@ export async function runOrchestrator(
       );
     }
 
-    if (buildSucceeded && artifact && criteria.length > 0) {
+    if (buildSucceeded && artifact && criteria.length > 0 && !stopReason) {
       if (timeExceeded()) {
         stopReason = budgetReason();
         code = "TIME_BUDGET_EXCEEDED";
@@ -808,8 +898,13 @@ export async function runOrchestrator(
       }
     }
   } catch (error) {
-    stopReason = `orchestrator error: ${error instanceof Error ? error.message : String(error)}`;
-    code = "INTERNAL_ERROR";
+    if (error instanceof WorkspaceSetupError) {
+      stopReason = error.message;
+      code = "VCS_FAILED";
+    } else {
+      stopReason = `orchestrator error: ${error instanceof Error ? error.message : String(error)}`;
+      code = "INTERNAL_ERROR";
+    }
   } finally {
     if (serial.running) {
       const stopped = await serial.stop();
@@ -839,12 +934,13 @@ export async function runOrchestrator(
     code = "NO_CRITERIA";
   }
 
+  const branchName = session?.branch ?? request.branch ?? null;
   const derived = finalizeRunRecord({
-    id: request.runId ?? `run-${startedAt}`,
+    id: runId,
     createdAt: startedAt,
     profile: request.profile.prodotto,
     request: request.userMessage,
-    branch: request.branch ?? null,
+    branch: branchName,
     criteria,
     evidence,
     changes: [...changes.values()],
@@ -870,11 +966,11 @@ export async function runOrchestrator(
     } else {
       const outcomes = criterionOutcomesFromRecord(
         finalizeRunRecord({
-          id: request.runId ?? `run-${startedAt}`,
+          id: runId,
           createdAt: startedAt,
           profile: request.profile.prodotto,
           request: request.userMessage,
-          branch: request.branch ?? null,
+          branch: branchName,
           criteria,
           evidence,
           changes: [...changes.values()],
@@ -895,23 +991,88 @@ export async function runOrchestrator(
     }
   }
 
+  // The branch decision happens after the final code is known: a run that did
+  // not reach SUCCESS is restored, so a failed attempt cannot leave source
+  // changes on the base branch.
+  if (session && sessionStarted) {
+    const finished = await session.finish(code === "SUCCESS");
+    if (!finished.ok) {
+      stopReason = finished.reason;
+      code = "VCS_FAILED";
+    }
+  }
+
+  // A failed real compile is a useful exact-text known issue for the next run.
+  // It is only a note: it does not claim that the error was fixed.
+  if (code !== "SUCCESS" && build?.verification === "REAL" && build.verdict !== "SUCCESS") {
+    const diagnostics = parseCompilerDiagnostics(build.stderr, build.stdout);
+    const observed = diagnostics[0]?.raw ?? build.stderr.split(/\r?\n/).find((line) => line.trim() !== "")?.trim();
+    if (observed) {
+      knownIssues = mergeKnownIssues(knownIssues, [
+        {
+          error: observed,
+          hint: failedRunHint(new Date(now()).toISOString(), stopReason || "the run stopped before success"),
+        },
+      ]);
+    }
+  }
+
   if (!stopReason) {
     if (code === "SUCCESS") stopReason = "all acceptance criteria passed on real evidence";
     else if (code === "FLASH_BUDGET_EXCEEDED") stopReason = "flash budget exceeded";
     else stopReason = "the run stopped before a verified result";
   }
 
-  const baseReason = runRecordReason(derived.record, level, status);
-  const reason =
+  const sessionMetadata = session?.metadata();
+  const reportMetadata = {
+    branch: branchName,
+    baseBranch: sessionMetadata?.baseBranch ?? null,
+    commits: sessionMetadata?.commits ?? [],
+    restoredTo: sessionMetadata?.restoredTo ?? null,
+    kept: sessionMetadata ? sessionMetadata.kept : null,
+    knownIssuesPath: artifactPaths.knownIssuesPath,
+  };
+  let baseReason = runRecordReason(derived.record, level, status);
+  let reason =
     stopReason && baseReason !== stopReason ? `${baseReason} ${stopReason}` : baseReason;
-  const runRecord: RepairRunRecorded = {
+  let runRecord: RepairRunRecorded = {
     record: derived.record,
     level,
     status,
     simulated,
     reason,
   };
-  const report = formatRunReport(derived.record, level, status, reason);
+  let report = formatRunReport(derived.record, level, status, reason, reportMetadata);
+
+  const artifacts = await writeRunArtifacts({
+    projectDir,
+    report,
+    issues: knownIssues,
+    paths: artifactPaths,
+    writeFile: ports.writeFile,
+  });
+  if (!artifacts.ok) {
+    const wasSuccess = code === "SUCCESS";
+    stopReason = artifacts.reason;
+    code = "ARTIFACTS_FAILED";
+    // If the branch was kept for a successful run but the report could not be
+    // written, the run did not complete: restore it like any other failure.
+    if (wasSuccess && session && sessionStarted) {
+      const restored = await session.finish(false);
+      if (!restored.ok) stopReason = `${stopReason}; ${restored.reason}`;
+    }
+    const finalSession = session?.metadata();
+    const finalMetadata = {
+      ...reportMetadata,
+      kept: finalSession ? finalSession.kept : reportMetadata.kept,
+      restoredTo: finalSession?.restoredTo ?? reportMetadata.restoredTo,
+    };
+    baseReason = runRecordReason(derived.record, level, status);
+    reason = `${baseReason} ${stopReason}`;
+    runRecord = { ...runRecord, reason };
+    report = formatRunReport(derived.record, level, status, reason, finalMetadata);
+  }
+
   const criterionOutcomes = criterionOutcomesFromRecord(derived.record);
   await ports.recordRun?.(runRecord);
   await ports.say?.(report, { code, level, status });
@@ -930,5 +1091,10 @@ export async function runOrchestrator(
     serialStatus: serial.getStatus(),
     attempts,
     flashes,
+    branch: branchName,
+    baseBranch: sessionMetadata?.baseBranch ?? null,
+    commits: sessionMetadata?.commits ?? [],
+    reportPath: artifacts.paths.reportPath,
+    knownIssuesPath: artifacts.paths.knownIssuesPath,
   };
 }

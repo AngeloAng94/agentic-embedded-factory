@@ -86,6 +86,15 @@ function label(status: CriterionOutcomeStatus): string {
   return "NON VALUTATO";
 }
 
+export interface RunReportMetadata {
+  branch?: string | null;
+  baseBranch?: string | null;
+  commits?: readonly { attempt: number; commit: string; message: string }[];
+  restoredTo?: string | null;
+  kept?: boolean | null;
+  knownIssuesPath?: string | null;
+}
+
 export function formatRunReport(
   record: RunRecord,
   level: VerificationLevel | null = deriveLevel(
@@ -94,6 +103,7 @@ export function formatRunReport(
   ),
   status: Verdict = deriveStatus(record.evidence, level),
   reason: string = runRecordReason(record, level, status),
+  metadata: RunReportMetadata = {},
 ): string {
   const outcomes = criterionOutcomesFromRecord(record);
   const lines: string[] = [
@@ -104,10 +114,27 @@ export function formatRunReport(
     `- Livello: ${level ?? "nessuno"}`,
     `- Verdetto: ${status}`,
     `- Motivo: ${reason}`,
-    "",
-    "## Evidenze",
-    "",
   ];
+  if (metadata.branch !== undefined) lines.push(`- Branch: ${metadata.branch ?? "nessuno"}`);
+  if (metadata.baseBranch !== undefined) {
+    lines.push(`- Branch base: ${metadata.baseBranch ?? "nessuno"}`);
+  }
+  if (metadata.kept !== undefined && metadata.kept !== null) {
+    if (metadata.kept) {
+      lines.push("- Ripristino: branch conservato (run riuscita)");
+    } else if (metadata.restoredTo !== null && metadata.restoredTo !== undefined) {
+      lines.push(`- Ripristino: branch eliminato; base ${metadata.restoredTo}`);
+    } else {
+      lines.push("- Ripristino: branch non conservato; ripristino non confermato");
+    }
+  }
+  for (const commit of metadata.commits ?? []) {
+    lines.push(`- Commit tentativo ${commit.attempt}: ${commit.commit} — ${commit.message}`);
+  }
+  if (metadata.knownIssuesPath) {
+    lines.push(`- Known issues: ${metadata.knownIssuesPath}`);
+  }
+  lines.push("", "## Evidenze", "");
 
   if (record.evidence.length === 0) {
     lines.push("- Nessuna evidenza registrata.");

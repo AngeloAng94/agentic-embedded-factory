@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadProfile, type ProductProfile } from "../core/profile";
@@ -17,6 +17,7 @@ import {
 } from "../agent/orchestrator";
 import type { KnownIssue } from "../agent/deterministicRepair";
 import type { TurnFile, TurnWrite } from "../agent/turn";
+import { InMemoryVcs } from "../core/vcs";
 
 const BASE_YAML = [
   "prodotto: DEMO-ORCH-01",
@@ -61,7 +62,7 @@ const FIRST_FILE = [
   "",
   "// [AI_START_APP]",
   "int main(void) {",
-  "    led_init();",
+  "    led_ini();",
   "    return 0;",
   "}",
   "// [AI_END_APP]",
@@ -185,6 +186,9 @@ async function run(
   modelRuntime?: FakeModelRuntime,
   now?: () => number,
   knownIssues?: KnownIssue[],
+  vcs?: InMemoryVcs,
+  runId?: string,
+  projectDir: string = dir,
 ): Promise<{
   result: Awaited<ReturnType<typeof runOrchestrator>>;
   writes: TurnWrite[][];
@@ -197,12 +201,14 @@ async function run(
     project: { name: "DEMO-ORCH-01", rtos: "freertos", board: "demo", mcu: "stm32" },
     files,
     userMessage: "make the LED blink",
-    projectDir: dir,
+    projectDir,
     anchors: ["APP", "LED"],
     serialSession: serial,
     modelRuntime,
     now,
     knownIssues,
+    vcs,
+    runId,
     tools: {
       ...tools,
       build: (input) => {
@@ -234,7 +240,7 @@ function flashCounter(): { tools: Partial<OrchestratorTools>; count: () => numbe
   };
 }
 
-describe("Phase 6c orchestrator", () => {
+describe("Phase 6c/6d orchestrator", () => {
   test("a deterministic parser repair completes the whole cycle without calling the model", async () => {
     let attempt = 0;
     const model = new FakeModelRuntime(() => {
@@ -247,7 +253,7 @@ describe("Phase 6c orchestrator", () => {
         build: () => {
           attempt += 1;
           return attempt === 1
-            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_init'")
+            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_ini'")
             : buildSuccess(2);
         },
         ...flashes.tools,
@@ -266,10 +272,43 @@ describe("Phase 6c orchestrator", () => {
     expect(model.callCount).toBe(0);
     expect(runResult.writes).toHaveLength(1);
     expect(runResult.writes[0]?.[0]?.block).toBe("APP");
-    expect(runResult.buildCalls[1]?.content).toContain("void led_init(void) {}");
-    expect(runResult.result.files[0]?.content).toContain("void led_init(void) {}");
+    expect(runResult.buildCalls[1]?.content).toContain("led_init();");
+    expect(runResult.buildCalls[1]?.content).not.toContain("led_ini();");
+    expect(runResult.result.files[0]?.content).toContain("led_init();");
     expect(runResult.result.report).toContain("| Criterio di accettazione | Esito |");
     expect(runResult.result.report.trimEnd().split("\n").at(-1)).toContain("PASS");
+  });
+
+  test("an undefined symbol with no near match is handed to the model with no deterministic write", async () => {
+    let attempt = 0;
+    const prompts: string[] = [];
+    const model = new FakeModelRuntime((request) => {
+      prompts.push(request.prompt);
+      return plan(
+        "implement missing_function",
+        "int main(void) {\n    missing_function();\n    return 0;\n}",
+      );
+    });
+    const runResult = await run(
+      SERIAL_PASS,
+      {
+        build: () => {
+          attempt += 1;
+          return attempt === 1
+            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `missing_function'")
+            : buildSuccess(2);
+        },
+      },
+      session("BOOT OK\n"),
+      model,
+    );
+
+    expect(runResult.result.ok).toBe(true);
+    expect(model.callCount).toBe(1);
+    expect(prompts[0]).toContain("no existing declared function is one edit away");
+    expect(runResult.writes).toHaveLength(1);
+    expect(runResult.writes[0]?.[0]?.content).toContain("missing_function();");
+    expect(runResult.writes[0]?.[0]?.content).not.toContain("void missing_function");
   });
 
   test("a missing include is refused outside the blocks and is handed to the model", async () => {
@@ -304,7 +343,7 @@ describe("Phase 6c orchestrator", () => {
 
     expect(runResult.result.ok).toBe(true);
     expect(model.callCount).toBe(1);
-    expect(prompts[0]).toContain("outside the marked blocks");
+    expect(prompts[0]).toContain("would not fix a standard function");
     expect(prompts[0]).toContain("declare the board header inside the APP block");
     expect(runResult.result.attempts).toBe(2);
     expect(runResult.result.report.trimEnd().split("\n").at(-1)).toContain("PASS");
@@ -359,7 +398,7 @@ describe("Phase 6c orchestrator", () => {
         build: () => {
           attempt += 1;
           return attempt === 1
-            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_init'")
+            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_ini'")
             : buildSuccess(2);
         },
       },
@@ -390,7 +429,7 @@ describe("Phase 6c orchestrator", () => {
         build: () => {
           attempt += 1;
           return attempt === 1
-            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_init'")
+            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_ini'")
             : buildSuccess(2);
         },
         targetTest: () => toolOk({ passed: true }),
@@ -401,7 +440,7 @@ describe("Phase 6c orchestrator", () => {
     expect(runResult.result.ok).toBe(true);
     expect(runResult.result.code).toBe("SUCCESS");
     expect(runResult.result.runRecord.level).toBe("observed");
-    expect(runResult.result.files[0]?.content).toContain("void led_init(void) {}");
+    expect(runResult.result.files[0]?.content).toContain("led_init();");
   });
 
   test("a failing on-target test blocks observed", async () => {
@@ -490,7 +529,7 @@ describe("Phase 6c orchestrator", () => {
         build: () => {
           attempt += 1;
           return attempt === 1
-            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_init'")
+            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_ini'")
             : buildSuccess(2);
         },
       },
@@ -587,6 +626,85 @@ describe("Phase 6c orchestrator", () => {
     expect(runResult.result.ok).toBe(false);
     expect(runResult.result.code).toBe("BUILD_NOT_AVAILABLE");
     expect(flashes.count()).toBe(0);
+  });
+
+  test("Phase 6d keeps a successful run branch with one commit per attempt", async () => {
+    const vcs = new InMemoryVcs("main");
+    let attempt = 0;
+    const runResult = await run(
+      SERIAL_PASS,
+      {
+        build: () => {
+          attempt += 1;
+          return attempt === 1
+            ? buildFailure("src/main.c:(.text+0x4): undefined reference to `led_ini'")
+            : buildSuccess(2);
+        },
+      },
+      session("BOOT OK\n"),
+      undefined,
+      undefined,
+      undefined,
+      vcs,
+      "run-6d-success",
+    );
+
+    expect(runResult.result.ok).toBe(true);
+    expect(runResult.result.branch).toBe("job/run-6d-success");
+    expect(runResult.result.baseBranch).toBe("main");
+    expect(runResult.result.commits).toHaveLength(2);
+    expect(runResult.result.commits[0]?.commit).toBe("fake-0001");
+    expect(runResult.result.commits[1]?.commit).toBe("fake-0002");
+    expect((await vcs.currentState()).branch).toBe("job/run-6d-success");
+
+    const report = readFileSync(path.join(dir, "report.md"), "utf8");
+    expect(report).toContain("Branch: job/run-6d-success");
+    expect(report).toContain("Commit tentativo 1: fake-0001");
+    expect(report).toContain("Commit tentativo 2: fake-0002");
+    expect(report.trimEnd().split("\n").at(-1)).toContain("PASS");
+    expect(existsSync(path.join(dir, "known_issues.yaml"))).toBe(true);
+  });
+
+  test("Phase 6d restores the base branch on failure and leaves the report", async () => {
+    const vcs = new InMemoryVcs("main");
+    const projectDir = mkdtempSync(path.join(tmpdir(), "py-bench-6d-failure-"));
+    const model = new FakeModelRuntime(() =>
+      plan("attempted fix", "int main(void) {\n    return 0;\n}"),
+    );
+    try {
+      const runResult = await run(
+        SERIAL_PASS,
+        {
+          build: () =>
+            buildFailure("src/main.c:(.text+0x4): undefined reference to `missing_function'"),
+        },
+        session("BOOT OK\n"),
+        model,
+        undefined,
+        undefined,
+        vcs,
+        "run-6d-failure",
+        projectDir,
+      );
+
+      expect(runResult.result.ok).toBe(false);
+      expect(runResult.result.code).toBe("REPAIR_LIMIT_REACHED");
+      expect(runResult.result.branch).toBe("job/run-6d-failure");
+      expect(runResult.result.commits).toHaveLength(3);
+      expect((await vcs.currentState()).branch).toBe("main");
+      expect(
+        await vcs.currentState().then((state) => state.branch === "job/run-6d-failure"),
+      ).toBe(false);
+
+      const report = readFileSync(path.join(projectDir, "report.md"), "utf8");
+      expect(report).toContain("branch eliminato");
+      expect(report.trimEnd().split("\n").at(-1)).toContain("NON VALUTATO");
+      const issues = readFileSync(path.join(projectDir, "known_issues.yaml"), "utf8");
+      expect(issues).toContain("missing_function");
+      expect(issues).toContain("no verified repair is recorded");
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   test("a serial criterion cannot pass on a simulated capture", async () => {

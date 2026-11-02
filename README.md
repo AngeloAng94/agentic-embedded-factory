@@ -8,12 +8,11 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 6c complete** (the Phase 5 corrections, no implicit acceptance
-> criterion, a `ModelRuntime` with the existing LLM client, Claude Agent SDK and
-> an explicitly marked fake test double, and the end-to-end orchestrator). Phase
-> 6d (branch/report/restore) does not exist yet; see
-> [What is not here yet](#what-is-not-here-yet). Nothing in this README describes
-> 6d as working.
+> **State: Phase 6d complete** (the Phase 6c corrections, deterministic repair
+> restricted to behavior-preserving mechanical edits, one VCS branch per run,
+> one commit per attempt, restore on failure, `report.md` and
+> `known_issues.yaml`). Phases 7–9 (the `py job` CLI and demo) are not part of
+> this tree yet; see [What is not here yet](#what-is-not-here-yet).
 >
 > There is no board and no cross toolchain in the development environment: every
 > real tool answers `NOT_AVAILABLE` with the reason, and the hardware test is
@@ -39,7 +38,11 @@ that the agent **cannot claim anything it has not measured**.
 | The orchestrator uses the same build, `memory_map_check`, flash gate, flash, serial and on-target-test functions as the MCP server; it never reimplements a gate | `agent/orchestrator.ts`, `tools/build.ts`, `tools/memoryMap.ts`, `tools/mcp/runState.ts`, `tools/flash.ts`, `tools/serialCapture.ts`, `tools/targetTest.ts` |
 | Every orchestrated run has a total-time and flash budget from the profile (`budget.tempo_totale_ms`, `budget.flash_max`), with prudent defaults; exceeding either stops the run and records why | `core/profile.ts`, `agent/orchestrator.ts` |
 | The orchestrator starts serial capture before build/flash; an incomplete capture leaves serial criteria unevaluated (never failed) and cannot reach `observed` | `agent/orchestrator.ts`, `tools/serialCapture.ts`, `core/verificationLevels.ts` |
-| Deterministic repair is also block-scoped: an include or layout fix outside `[AI_START_*]` is refused and handed to the model with the reason | `agent/deterministicRepair.ts`, `core/blockPatch.ts` |
+| Deterministic repair only applies behavior-preserving mechanical edits: a fixed standard header for an implicit standard function, or a single-edit correction to exactly one symbol (function, macro or object) declared in the project; a missing function is never turned into an empty stub | `agent/deterministicRepair.ts` |
+| Deterministic repair is also block-scoped: every fix is a `blockPatch` edit, and a layout/include change outside `[AI_START_*]` is refused and handed to the model with the reason | `agent/deterministicRepair.ts`, `core/blockPatch.ts` |
+| Every run given a `VcsPort` gets its own `job/<runId>` branch; each build attempt is committed, a successful branch is kept, and any other outcome restores the base branch and deletes the job branch | `agent/runSession.ts`, `agent/orchestrator.ts`, `tools/gitVcs.ts` |
+| `report.md` and `known_issues.yaml` are generated from the run; the report ends with the acceptance-criterion → outcome table, and a known-issue hint is input, never evidence | `agent/runSession.ts`, `agent/runReport.ts`, `core/knownIssues.ts` |
+| The profile warns explicitly when `budget.flash_max` is lower than `tentativi_max`; the warning is returned by `loadProfile` and printed by the MCP launcher | `core/profile.ts`, `tools/mcp/index.ts` |
 | The run report ends with the acceptance-criterion → outcome table; there is no prose after it | `agent/runReport.ts`, `agent/orchestrator.ts` |
 | The generation provider is selected by the profile; the fake runtime is a marked test double that requires an explicit opt-in and never falls back to a real provider | `core/profile.ts`, `agent/modelRuntime.ts`, `agent/turn.ts` |
 | `debug` uses a GDB allowlist: breakpoints, halt/continue, RAM/register reads and writes, detach; `load`, `restore` into FLASH, programming monitors and OpenOCD/probe-rs flash commands are refused | `tools/debugPolicy.ts`, `tools/debug.ts`, `tools/mcp/server.ts` |
@@ -61,10 +64,10 @@ that the agent **cannot claim anything it has not measured**.
 | The repair loop emits a validated `RunRecord` through `recordRun`; its level and status are derived from the evidence, never from the model or the build alone | `agent/repairLoop.ts`, `core/runRecord.ts` |
 | A model answer is only a proposal: `runAgentTurn` passes it through the same validated-patch path regardless of whether the runtime is the LLM client, Claude Agent SDK or the fake double | `agent/turn.ts`, `agent/modelRuntime.ts` |
 
-Not yet implemented, and deliberately absent from the code: branch/commit/restore
-per run, `report.md`, `known_issues.yaml`, the CLI and the demo (Phase 6d and
-later). The hardware tools are wired into the orchestrator but have never run on
-a board in this environment.
+Not yet implemented, and deliberately absent from the code: the `py job` CLI and
+the demo (Phases 7–9). Phase 6d is implemented in `agent/runSession.ts` and wired
+into the orchestrator; the hardware tools are wired too, but have never run on a
+board in this environment.
 
 ## Layout
 
@@ -73,6 +76,7 @@ core/          types, verdicts, build engine + dispatch, LLM client (Ollama /
                OpenAI-compatible), path safety, doctor, artifact inspection,
                project export, static safety analysis
                vcs.ts               VcsPort + FAKE in-memory double
+               knownIssues.ts       strict known_issues.yaml parser/formatter
                verificationLevels.ts  written → … → confirmed, from evidence
                runRecord.ts         validated record; level/verdict are derived
                profile.ts           product profile parser + total validation
@@ -101,15 +105,18 @@ agent/         turn.ts        one Convex-free turn: prompt → plan → validate
                modelRuntime.ts  provider boundary: llmClient, Claude Agent SDK,
                               explicit fake test double
                deterministicRepair.ts  parser ring for common GCC/linker errors;
-                              every fix is still a blockPatch edit
+                              no stubs: standard include or one-edit typo only,
+                              every fix still a blockPatch edit
+               runSession.ts  run branch, commit per attempt, restore on failure,
+                              report.md / known_issues.yaml artifact writer
                orchestrator.ts  serial start → build → map → flash → observe →
-                              criteria → RunRecord/report, with budgets and
-                              the same gates as the MCP server
+                              criteria → RunRecord/report, with budgets, VCS
+                              and the same gates as the MCP server
                runReport.ts   report derived from evidence; criterion table last
                repairLoop.ts  the loop: build → compiler error → patch → rebuild;
                               emits the validated RunRecord through `recordRun`
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         322 tests: 312 pass, 10 skipped without a board / toolchain / git / Claude key
+tests/         340 tests: 330 pass, 10 skipped without a board / toolchain / git / Claude key
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -156,7 +163,7 @@ chip:
 
 ```bash
 bun install
-bun test                     # 312 pass, 10 skip (322 tests; board / toolchain / git / Claude key opt-in)
+bun test                     # 330 pass, 10 skip (340 tests; board / toolchain / git / Claude key opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -288,11 +295,17 @@ serial start → build → memory_map_check → canFlash gate → flash → seri
 ```
 
 Build failures first go to `agent/deterministicRepair.ts`, which recognizes the
-common GCC/linker errors. An undefined symbol gets a stub **inside a declared
-block**, through `applyBlockEdits`; a missing include, region overflow or type
-clash is refused with the reason and handed to `runAgentTurn` together with the
-real compiler output and any exact-text known-issue hints. A deterministic fix
-that would require an edit outside the markers is never applied.
+common GCC/linker errors. The deterministic ring applies only two kinds of
+behavior-preserving edit, always through `applyBlockEdits`: a fixed standard
+header for an implicit declaration of a known standard function (for example
+`strlen` → `<string.h>`), or a single-edit typo correction to exactly one
+symbol (function, macro or object) declared in the project. An undefined symbol with no unambiguous near
+match is handed to the model unchanged; it is never turned into an empty stub,
+because an empty stub compiles without implementing the behavior. A missing
+include outside a marked block, a region overflow, a type clash, an ambiguous
+match, or a fix that needs an undeclared block is refused with the reason and
+handed to `runAgentTurn` together with the real compiler output and any
+exact-text known-issue hints.
 
 The serial session is started before the build and flash. If `stop()` reports
 `complete: false` because a flash/reset happened first, the orchestrator records
@@ -306,9 +319,29 @@ the serial criteria as unevaluated (`NOT_AVAILABLE`/`UNKNOWN`, not failed) and
 ```
 
 Every run reads `budget.tempo_totale_ms` and `budget.flash_max` from the profile;
-when absent, the parser defaults to 8 minutes and 2 flashes. A budget stop is
-written into the run record's `reason`. `RunRecord` still stores no level or
-verdict: `level` and `status` are derived from the evidence.
+when absent, the parser defaults to 8 minutes and 2 flashes. If `flash_max` is
+lower than `tentativi_max`, `loadProfile` returns an explicit warning (the MCP
+launcher prints it): the profile is still valid, but the run cannot flash every
+attempt. A budget stop is written into the run record's `reason`. `RunRecord`
+still stores no level or verdict: `level` and `status` are derived from the
+evidence.
+
+### Phase 6d: branch, commits, restore, artifacts
+
+When a `VcsPort` is supplied, `agent/orchestrator.ts` creates one
+`job/<runId>` branch before the serial session and makes one commit per build
+attempt, including failed attempts. A `SUCCESS` run keeps the branch. Every
+other outcome restores the base branch and deletes the job branch, so a failed
+run leaves no source changes behind; the report and known-issue catalogue are
+written after the restore and are therefore still available for diagnosis.
+
+`report.md` is derived from the validated `RunRecord`; its last line is always
+the criterion table. `known_issues.yaml` is a strict list of exact error texts
+and hints: a hint is an input for the next repair, never evidence. A failed real
+compile adds an entry with the observed error and states that no verified repair
+is recorded; a successful run does not invent one. The hardware tools are still
+injectable; in this environment every real run stops at
+`NOT_AVAILABLE` with the reason.
 
 ## Model runtime and profile selection
 
@@ -375,11 +408,10 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phase 6d (one VCS branch per run, one commit per attempt, restore on failure,
-`report.md` and `known_issues.yaml`) does not exist yet. The hardware tools are
-wired into the orchestrator, but none of them has run against a real board here.
-The MCP run record remains session-scoped; it is not the persistent store for
-repair-loop records. Phases 7–9 (the `py job` CLI and demo) are also absent.
+The hardware tools are wired into the orchestrator, but none of them has run
+against a real board here. The MCP run record remains session-scoped; it is not
+the persistent store for repair-loop records. Phases 7–9 (the `py job` CLI and
+demo) are absent.
 
 `memory_map_check` reports per-region usage only after the VMA/LMA checks; a
 stripped ELF with no section headers is `NOT_AVAILABLE`, not a guess from the

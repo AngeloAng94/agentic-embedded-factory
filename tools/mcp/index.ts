@@ -54,6 +54,9 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
+  for (const warning of loaded.warnings) {
+    process.stderr.write(`py-bench mcp: ${warning}\n`);
+  }
 
   const server = createPyBenchMcpServer({
     profile: loaded.profile,

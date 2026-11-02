@@ -20,7 +20,7 @@ export interface VcsPort {
   /** Creates `name` from the current HEAD and switches to it. */
   createBranch(name: string): Promise<void>;
   /** Stages everything and commits. Returns the commit id. */
-  commit(message: string): Promise<string>;
+  commit(message: string, options?: { allowEmpty?: boolean }): Promise<string>;
   /** `git diff` between two revisions; no arguments = working tree vs HEAD. */
   diff(from?: string, to?: string): Promise<string>;
   /** Deletes the branch; if it is checked out, returns to where it started. */

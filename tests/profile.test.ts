@@ -57,6 +57,9 @@ describe("product profile", () => {
       expect(result.profile.criteri).toHaveLength(3);
       expect(result.profile.tentativi_max).toBe(3);
       expect(result.profile.budget).toEqual({ tempo_totale_ms: 480000, flash_max: 2 });
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain("budget.flash_max");
+      expect(result.warnings[0]).toContain("tentativi_max");
       expect(editableAnchors(result.profile)).toEqual(["APP", "LED"]);
     }
   });
@@ -70,6 +73,25 @@ describe("product profile", () => {
         flash_max: DEFAULT_RUN_FLASH_BUDGET,
       });
     }
+  });
+
+  test("warns explicitly when flash_max is lower than tentativi_max", () => {
+    const defaulted = loadProfile(BASE);
+    expect(defaulted.ok).toBe(true);
+    if (defaulted.ok) {
+      expect(defaulted.warnings).toHaveLength(1);
+      expect(defaulted.warnings[0]).toContain("flash_max (2)");
+      expect(defaulted.warnings[0]).toContain("tentativi_max (3)");
+      expect(defaulted.warnings[0]).toContain("at most 2");
+    }
+
+    const enough = loadProfile(`${BASE}budget: { tempo_totale_ms: 120000, flash_max: 3 }`);
+    expect(enough.ok).toBe(true);
+    if (enough.ok) expect(enough.warnings).toEqual([]);
+
+    const zero = loadProfile(`${BASE}budget: { tempo_totale_ms: 120000, flash_max: 0 }`);
+    expect(zero.ok).toBe(true);
+    if (zero.ok) expect(zero.warnings[0]).toContain("flash at most 0");
   });
 
   test("parses budget overrides and rejects invalid bounds", () => {
