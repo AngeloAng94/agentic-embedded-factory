@@ -22,5 +22,8 @@
     "prettier": "3.7.3",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.48.1"
+  },
+  "dependencies": {
+    "@vly-ai/integrations": "^0.6.14"
   }
 }
