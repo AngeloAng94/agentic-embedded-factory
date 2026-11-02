@@ -6,6 +6,7 @@
  */
 import type { ProductProfile } from "../core/profile";
 import { invalidProfile, notAvailable, toolOk, type ToolOutcome } from "../core/toolResult";
+import { validateDebugCommands } from "./debugPolicy";
 import {
   runCommand,
   systemResolver,
@@ -21,6 +22,8 @@ export function runGdbBatch(
 ): ToolOutcome<ExecResult> {
   const resolve = options.resolve ?? systemResolver;
   if (commands.length === 0) return invalidProfile("no gdb command was provided");
+  const policy = validateDebugCommands(profile, commands);
+  if (!policy.ok) return policy;
 
   const gdb = resolve("arm-none-eabi-gdb") ?? resolve("gdb");
   if (!gdb) return notAvailable("arm-none-eabi-gdb and gdb are not installed or not in PATH");

@@ -4,10 +4,12 @@ import {
   type RepairLoopPorts,
   type RepairLoopResult,
   type RepairRunRecord,
+  type RepairRunRecorded,
 } from "../agent/repairLoop";
 import type { TurnFile, TurnWrite } from "../agent/turn";
 import { isVerifiedSuccess, projectStatusFor } from "../core/buildStatus";
 import { dispatchBuild, notAvailableFromDispatch, resolveRunnerConfig } from "../core/buildDispatch";
+import { validateRunRecord } from "../core/runRecord";
 
 /**
  * These are the old Convex-cycle tests (agentCycle.test.ts) moved onto the
@@ -29,6 +31,7 @@ function seedFiles(): TurnFile[] {
 class MemoryStore implements RepairLoopPorts {
   files: TurnFile[];
   runs: RepairRunRecord[] = [];
+  runRecords: RepairRunRecorded[] = [];
   messages: { content: string; meta?: unknown }[] = [];
   versions = new Map<string, { verdict: string | null }>();
   status: "verified" | "unverified" | "failed" = "unverified";
@@ -50,6 +53,10 @@ class MemoryStore implements RepairLoopPorts {
   record(run: RepairRunRecord): void {
     this.runs.push(run);
     if (run.type === "build") this.status = projectStatusFor(run.build);
+  }
+
+  recordRun(run: RepairRunRecorded): void {
+    this.runRecords.push(run);
   }
 
   onBuildRecorded({ build }: { attempt: number; build: Parameters<typeof isVerifiedSuccess>[0] }): void {
@@ -289,6 +296,9 @@ describe("repair loop — build evidence and repair", () => {
       expect(String(build?.build.reason)).toContain("RUNNER_NOT_CONFIGURED");
 
       expect(store.status).toBe("unverified");
+      expect(store.runRecords).toHaveLength(1);
+      expect(store.runRecords[0]?.level).toBe("written");
+      expect(store.runRecords[0]?.status).toBe("UNKNOWN");
     } finally {
       llm.stop();
     }
@@ -324,11 +334,60 @@ describe("repair loop — build evidence and repair", () => {
       expect(store.status).toBe("verified");
       expect(store.versions.get("src/led.c")?.verdict).toBe("SUCCESS");
 
+      expect(store.runRecords).toHaveLength(1);
+      const recorded = store.runRecords[0]!;
+      expect(recorded.level).toBe("compiled");
+      expect(recorded.status).toBe("UNKNOWN");
+      expect(recorded.simulated).toBe(false);
+      expect(recorded.record.changes).toEqual([
+        { path: "src/led.c", kind: "create", block: null },
+      ]);
+      expect(recorded.record.evidence.map((entry) => entry.level)).toEqual([
+        "written",
+        "compiled",
+      ]);
+      expect(validateRunRecord(recorded.record).ok).toBe(true);
+      expect("level" in recorded.record).toBe(false);
+
       // retrieval is real and recorded as evidence, not printed as decoration
       const [retrieval] = store.retrieval();
       expect(retrieval).toBeDefined();
       expect(String(retrieval?.log)).toContain("[kb]");
       expect(runner.attempts).toEqual([1]);
+    } finally {
+      llm.stop();
+      runner.stop();
+    }
+  });
+
+  test("an explicit simulation never records a REAL level", async () => {
+    const llm = startLlm(() => createPlan("src/simulated.c"));
+    const runner = startRunner(() => realSuccess());
+    const store = new MemoryStore(seedFiles());
+
+    try {
+      await runRepairLoop(
+        {
+          project,
+          files: store.files,
+          userMessage: "simulate an LED driver",
+          simulated: true,
+          env: envWith({ LLM_BASE_URL: llm.url, BUILD_RUNNER_URL: runner.url }),
+        },
+        store,
+      );
+
+      const recorded = store.runRecords[0]!;
+      expect(recorded.simulated).toBe(true);
+      expect(recorded.level).toBeNull();
+      expect(recorded.status).toBe("UNKNOWN");
+      expect(recorded.record.evidence.length).toBeGreaterThan(0);
+      for (const evidence of recorded.record.evidence) {
+        expect(evidence.verification).toBe("SIMULATED");
+      }
+      if (recorded.level !== null) {
+        expect(["written", "compiled"]).toContain(recorded.level);
+      }
     } finally {
       llm.stop();
       runner.stop();
@@ -425,6 +484,11 @@ describe("repair loop — build evidence and repair", () => {
       expect(llm.calls()).toBe(3);
       expect(store.status).toBe("failed");
       expect(store.builds()).toHaveLength(3);
+      expect(store.runRecords).toHaveLength(1);
+      expect(store.runRecords[0]?.level).toBe("written");
+      expect(store.runRecords[0]?.status).toBe("FAILURE");
+      expect(store.runRecords[0]?.record.evidence.at(-1)?.level).toBe("compiled");
+      expect(store.runRecords[0]?.record.evidence.at(-1)?.verdict).toBe("FAILURE");
       expect(String(store.builds()[0]?.build.stderr)).toContain("implicit declaration");
     } finally {
       llm.stop();
@@ -460,6 +524,11 @@ describe("repair loop — build evidence and repair", () => {
       expect(store.files).toEqual(seedFiles());
       expect(store.builds()).toHaveLength(0);
       expect(store.messages[store.messages.length - 1]?.content).toContain("PA5");
+      expect(store.runRecords).toHaveLength(1);
+      expect(store.runRecords[0]?.level).toBeNull();
+      expect(store.runRecords[0]?.status).toBe("UNKNOWN");
+      expect(store.runRecords[0]?.record.evidence).toEqual([]);
+      expect(store.runRecords[0]?.record.changes).toEqual([]);
     } finally {
       llm.stop();
     }

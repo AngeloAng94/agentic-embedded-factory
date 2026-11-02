@@ -48,6 +48,22 @@ export function levelRank(level: VerificationLevel): number {
   return VERIFICATION_LEVELS.indexOf(level);
 }
 
+/** The highest level a simulation is allowed to claim. */
+export const SIMULATION_MAX_LEVEL: VerificationLevel = "compiled";
+
+/**
+ * Simulation is useful for demos, but it can never prove a flash or an
+ * on-target observation. Even if a simulated backend accidentally returns a
+ * higher level, this cap keeps the record at `compiled`.
+ */
+export function capSimulationLevel(
+  level: VerificationLevel | null,
+  simulated: boolean,
+): VerificationLevel | null {
+  if (!simulated || level === null) return level;
+  return levelRank(level) > levelRank(SIMULATION_MAX_LEVEL) ? SIMULATION_MAX_LEVEL : level;
+}
+
 /** True only when this single piece of evidence can back this level. */
 export function qualifies(evidence: Evidence, level: VerificationLevel): boolean {
   if (evidence.level !== level) return false;

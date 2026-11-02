@@ -6,8 +6,9 @@
  *   --profile <path>       profile YAML (default: PY_BENCH_MCP_PROFILE or profiles/demo-board.yaml)
  *   --project-dir <path>   base directory for relative tool paths
  *
- * The test double is selected only by PY_BENCH_MCP_SIMULATE=1. It is explicit
- * and every result stays SIMULATED; normal runs never use it.
+ * `--simulate` is the explicit demo/test mode: every result is SIMULATED, the
+ * run record is marked simulated, and no level beyond `compiled` is allowed.
+ * Tests can also call `createPyBenchMcpServer` with injected fake backends.
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -32,7 +33,7 @@ async function main(): Promise<void> {
     flagValue(argv, "--profile") ??
     process.env.PY_BENCH_MCP_PROFILE ??
     path.resolve(projectDir, "profiles/demo-board.yaml");
-  const mode: McpMode = process.env.PY_BENCH_MCP_SIMULATE === "1" ? "simulated" : "real";
+  const mode: McpMode = argv.includes("--simulate") ? "simulated" : "real";
 
   let text: string;
   try {

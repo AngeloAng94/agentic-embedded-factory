@@ -10,8 +10,8 @@
  *  - a target the latest doctor marked unreliable blocks flash until the doctor
  *    is run again and reports `readsReliable: true`.
  *
- * `simulated` exists only for the MCP integration tests (and is explicit in
- * every result). It is never selected by a profile and never returns REAL.
+ * `simulated` is the explicit `--simulate` mode for tests and demos (never an
+ * environment variable). It is marked in every result and never returns REAL.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import path from "node:path";
@@ -21,6 +21,7 @@ import { toolOk, type ToolOutcome } from "../../core/toolResult";
 import type { Verdict, Verification } from "../../core/types";
 import { runBuild } from "../build";
 import { runGdbBatch } from "../debug";
+import { validateDebugCommands } from "../debugPolicy";
 import { runProfileDoctor, type DoctorCheck, type ProfileDoctorReport } from "../doctor";
 import type { ExecResult } from "../exec";
 import { runFlash } from "../flash";
@@ -134,6 +135,8 @@ export interface ToolResponse<T> {
   verdict: Verdict;
   actor: "tool";
   actorId: string;
+  simulated: boolean;
+  maxLevel: "compiled" | null;
   evidence: ToolEvidence[];
   result: T | null;
   reason: string | null;
@@ -276,11 +279,12 @@ function toolResponse<T>(
 ): ToolResponse<T> {
   const artifact = input.artifact ?? null;
   const sha256 = input.sha256 ?? null;
+  const verification: Verification = run.simulated ? "SIMULATED" : input.verification;
   if (input.record !== false) {
     run.recordEvidence({
       tool: input.tool,
       group: input.group,
-      verification: input.verification,
+      verification,
       verdict: input.verdict,
       detail: input.detail,
       artifact,
@@ -291,10 +295,12 @@ function toolResponse<T>(
     ok: input.ok,
     tool: input.tool,
     group: input.group,
-    verification: input.verification,
+    verification,
     verdict: input.verdict,
     actor: "tool",
     actorId: "py-bench-mcp",
+    simulated: run.simulated,
+    maxLevel: run.simulated ? "compiled" : null,
     evidence: run.evidence.map((entry) => ({ ...entry })),
     result: input.result,
     reason: input.reason,
@@ -309,7 +315,7 @@ export function createPyBenchMcpServer(options: McpServerOptions): McpServer {
   const profile = options.profile;
   const mode: McpMode = options.mode ?? "real";
   const projectDir = path.resolve(options.projectDir ?? process.cwd());
-  const run = new McpRunState(profile);
+  const run = new McpRunState(profile, { simulated: mode === "simulated" });
   const serial = serialSession(profile, mode, options.serialBackend, projectDir);
 
   const server = new McpServer(
@@ -676,13 +682,20 @@ export function createPyBenchMcpServer(options: McpServerOptions): McpServer {
         "[side-effects] Write the ELF to the board. It is refused unless the current run record has memory_map_check SUCCESS for the exact same ELF SHA-256 and the latest doctor did not mark the target unreliable. A refusal explains what to do next.",
       ),
       inputSchema: {
-        artifact: z.string().min(1).describe("ELF to flash"),
+        artifact: z.string().min(1).describe("ELF, or a .bin/.hex derived from a checked ELF"),
+        source: z
+          .string()
+          .optional()
+          .describe(
+            "checked source ELF when flashing a .bin/.hex; the server must derive and verify the exact file",
+          ),
       },
       annotations: FLASH_ANNOTATIONS,
     },
-    async ({ artifact }) => {
+    async ({ artifact, source }) => {
       const artifactPath = resolvePath(projectDir, artifact);
-      const gate = run.canFlash(artifactPath);
+      const sourcePath = source ? resolvePath(projectDir, source) : undefined;
+      const gate = run.canFlash(artifactPath, sourcePath);
       if (!gate.ok) {
         const verification: Verification = gate.sha256 === null ? "NOT_AVAILABLE" : "REAL";
         const response = toolResponse(run, serial, {
@@ -703,7 +716,7 @@ export function createPyBenchMcpServer(options: McpServerOptions): McpServer {
       const flashed: ToolOutcome<ExecResult> =
         mode === "simulated"
           ? toolOk(simulatedExec("flash"), "SIMULATED")
-          : runFlash(profile, artifactPath, { cwd: projectDir });
+          : runFlash(profile, gate.flashPath, { cwd: projectDir });
 
       if (!flashed.ok) {
         const verification = failureVerification(flashed.reason, mode);
@@ -757,6 +770,25 @@ export function createPyBenchMcpServer(options: McpServerOptions): McpServer {
       annotations: DEBUG_ANNOTATIONS,
     },
     async ({ commands }) => {
+      // The policy is part of `debug`, not of the real GDB adapter: a simulated
+      // backend must not be a bypass for load/FLASH writes either.
+      const policy = validateDebugCommands(profile, commands);
+      if (!policy.ok) {
+        const verification = failureVerification(policy.reason, mode);
+        const response = toolResponse(run, serial, {
+          tool: "debug",
+          group: "side-effects",
+          ok: false,
+          verification,
+          verdict: failureVerdict(verification),
+          result: null,
+          reason: policy.reason,
+          detail: policy.reason,
+          artifact: null,
+        });
+        return textResult(response);
+      }
+
       const debugged: ToolOutcome<ExecResult> =
         mode === "simulated"
           ? toolOk(simulatedExec("gdb"), "SIMULATED")
@@ -808,10 +840,42 @@ export function createPyBenchMcpServer(options: McpServerOptions): McpServer {
           .string()
           .optional()
           .describe("profile criterion this test is evidence for"),
+        artifact: z
+          .string()
+          .optional()
+          .describe("firmware the on-target test loads; it must pass the same flash gate"),
+        source: z
+          .string()
+          .optional()
+          .describe("checked source ELF when artifact is a .bin/.hex"),
       },
       annotations: TARGET_TEST_ANNOTATIONS,
     },
-    async ({ criterion }) => {
+    async ({ criterion, artifact, source }) => {
+      let artifactPath: string | null = null;
+      if (artifact) {
+        artifactPath = resolvePath(projectDir, artifact);
+        const gate = run.canFlash(
+          artifactPath,
+          source ? resolvePath(projectDir, source) : undefined,
+        );
+        if (!gate.ok) {
+          const response = toolResponse(run, serial, {
+            tool: "target_test",
+            group: "side-effects",
+            ok: false,
+            verification: gate.sha256 === null ? "NOT_AVAILABLE" : "REAL",
+            verdict: failureVerdict(gate.sha256 === null ? "NOT_AVAILABLE" : "REAL"),
+            result: null,
+            reason: gate.reason,
+            detail: gate.reason,
+            artifact: artifactPath,
+            sha256: gate.sha256,
+          });
+          return textResult(response);
+        }
+      }
+
       const tested = await runTargetTest(
         mode === "simulated"
           ? async () => toolOk({ passed: true }, "SIMULATED")
@@ -840,7 +904,7 @@ export function createPyBenchMcpServer(options: McpServerOptions): McpServer {
         ok: true,
         verification: tested.verification,
         verdict: value.passed ? "SUCCESS" : "FAILURE",
-        result: { ...value, criterion: criterion ?? null },
+        result: { ...value, criterion: criterion ?? null, artifact: artifactPath },
         reason: value.passed ? null : "the on-target test did not pass",
         detail: `on-target test ${value.passed ? "passed" : "failed"}${
           criterion ? `; criterion=${criterion}` : ""

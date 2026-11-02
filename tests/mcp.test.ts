@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -7,6 +7,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { loadProfile } from "../core/profile";
 import type { ProfileDoctorReport } from "../tools/doctor";
 import { checkMemoryMap } from "../tools/memoryMap";
+import { deriveFromElf } from "../tools/mcp/artifacts";
 import { McpRunState } from "../tools/mcp/runState";
 import { buildElf32, vectorBytes } from "./helpers/elfFixture";
 
@@ -41,12 +42,14 @@ function elf(marker: number): Uint8Array {
         name: ".vectors",
         flags: 2,
         address: 0x0800_0000,
+        loadAddress: 0x0800_0000,
         bytes: vectorBytes(0x2000_4000, 0x0800_0201),
       },
       {
         name: ".text",
         flags: 6,
         address: 0x0800_0200,
+        loadAddress: 0x0800_0200,
         bytes: new Array<number>(16).fill(marker),
       },
       {
@@ -64,9 +67,13 @@ const dir = mkdtempSync(path.join(tmpdir(), "py-bench-mcp-test-"));
 const profilePath = path.join(dir, "board.yaml");
 const elfA = path.join(dir, "app-a.elf");
 const elfB = path.join(dir, "app-b.elf");
+const externalBin = path.join(dir, "external-b.bin");
 writeFileSync(profilePath, PROFILE_YAML);
 writeFileSync(elfA, elf(1));
 writeFileSync(elfB, elf(2));
+const derivedB = deriveFromElf(profile, elfB, "bin");
+if (!derivedB.ok) throw new Error(derivedB.reason);
+writeFileSync(externalBin, readFileSync(derivedB.value.artifact));
 
 afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -106,7 +113,6 @@ function baseEnv(): Record<string, string> {
   );
   env.PY_BENCH_MCP_PROFILE = profilePath;
   env.PY_BENCH_MCP_PROJECT_DIR = dir;
-  env.PY_BENCH_MCP_SIMULATE = "1";
   return env;
 }
 
@@ -180,7 +186,7 @@ describe("MCP stdio server", () => {
   test("lists both groups and every tool can be called with structured evidence", async () => {
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: ["run", "mcp"],
+      args: ["run", "mcp", "--simulate"],
       cwd: path.resolve(import.meta.dir, ".."),
       env: baseEnv(),
       stderr: "pipe",
@@ -257,11 +263,25 @@ describe("MCP stdio server", () => {
       expect(mapB.ok).toBe(true);
       expect(mapB.verdict).toBe("SUCCESS");
 
-      const flashed = await call(client, "flash", { artifact: elfB });
+      const externalNoDerivation = await call(client, "flash", { artifact: externalBin });
+      responses.push(externalNoDerivation);
+      expect(externalNoDerivation.ok).toBe(false);
+      expect(String(externalNoDerivation.reason)).toContain("externally");
+
+      const targetNoGate = await call(client, "target_test", { artifact: externalBin });
+      responses.push(targetNoGate);
+      expect(targetNoGate.ok).toBe(false);
+      expect(String(targetNoGate.reason)).toContain("externally");
+
+      const flashed = await call(client, "flash", {
+        artifact: externalBin,
+        source: elfB,
+      });
       responses.push(flashed);
       expect(flashed.ok).toBe(true);
       expect(flashed.verification).toBe("SIMULATED");
       expect(flashed.verdict).toBe("SUCCESS");
+      expect((flashed.runRecord as Structured).derivations).toBeArray();
 
       const read = await call(client, "read_state", {
         mode: "stable",
@@ -279,16 +299,36 @@ describe("MCP stdio server", () => {
       expect(build.verification).toBe("SIMULATED");
       expect(build.verdict).toBe("SUCCESS");
 
+      const unsafeDebug = await call(client, "debug", { commands: ["load app.elf"] });
+      responses.push(unsafeDebug);
+      expect(unsafeDebug.ok).toBe(false);
+      expect(String(unsafeDebug.reason)).toContain("flash");
+
+      for (const commands of [
+        ["set {int}0x08000000 = 1"],
+        ["restore app.bin 0x08000000"],
+        ["monitor program app.elf"],
+      ]) {
+        const refused = await call(client, "debug", { commands });
+        responses.push(refused);
+        expect(refused.ok).toBe(false);
+        expect(String(refused.reason)).toContain("flash");
+      }
+
       const debug = await call(client, "debug", { commands: ["monitor reset"] });
       responses.push(debug);
       expect(debug.ok).toBe(true);
       expect(debug.verification).toBe("SIMULATED");
       expect(debug.verdict).toBe("SUCCESS");
 
-      const target = await call(client, "target_test", { criterion: "target-test-1" });
+      const target = await call(client, "target_test", {
+        criterion: "target-test-1",
+        artifact: externalBin,
+      });
       responses.push(target);
       expect(target.ok).toBe(true);
       expect((target.result as Structured).passed).toBe(true);
+      expect((target.result as Structured).artifact).toBe(externalBin);
 
       const status = await call(client, "serial_capture", { action: "status" });
       responses.push(status);
@@ -312,14 +352,21 @@ describe("MCP stdio server", () => {
       expect(((record.result as Structured).memoryMapChecks as unknown[]).length).toBe(2);
       expect((record.result as Structured).doctor).not.toBeNull();
       expect((record.result as Structured).serial).toMatchObject({ state: "stopped", complete: true });
+      expect(((record.result as Structured).derivations as unknown[]).length).toBe(1);
 
       for (const response of responses) {
-        expect(response.verification).toBeString();
+        expect(response.verification).toBe("SIMULATED");
         expect(response.verdict).toBeString();
         expect(response.actor).toBe("tool");
         expect(response.actorId).toBeString();
-        expect(response.evidence).toBeArray();
+        expect(response.simulated).toBe(true);
         expect(response.runRecord).toBeObject();
+        expect((response.runRecord as Structured).simulated).toBe(true);
+        expect((response.runRecord as Structured).maxLevel).toBe("compiled");
+        expect(response.evidence).toBeArray();
+        for (const evidence of response.evidence as Array<Record<string, unknown>>) {
+          expect(evidence.verification).toBe("SIMULATED");
+        }
       }
       expect(stderrText).not.toContain("Error");
     } finally {

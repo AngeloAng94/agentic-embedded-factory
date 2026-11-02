@@ -22,6 +22,13 @@ import {
   notAvailableFromDispatch,
   resolveRunnerConfig,
 } from "../core/buildDispatch";
+import {
+  finalizeRunRecord,
+  type DerivedRunRecord,
+  type RunChange,
+  type RunCriterion,
+} from "../core/runRecord";
+import { capSimulationLevel, deriveStatus, type Evidence } from "../core/verificationLevels";
 import type { KbDocument } from "../core/knowledge";
 import { formatSafetyReport } from "../core/safety";
 import type { BuildResult } from "../core/types";
@@ -47,6 +54,11 @@ export type RepairRunRecord =
  * validated every write) and must return the project files as they are after
  * the write, because the next attempt sees exactly those bytes.
  */
+export interface RepairRunRecorded extends DerivedRunRecord {
+  /** True only when this run was explicitly simulated. */
+  simulated: boolean;
+}
+
 export interface RepairLoopPorts {
   applyWrites(input: {
     writes: TurnWrite[];
@@ -54,6 +66,11 @@ export interface RepairLoopPorts {
     summary: string;
   }): Promise<TurnFile[]> | TurnFile[];
   record(run: RepairRunRecord): Promise<void> | void;
+  /**
+   * Final, validated record. It carries no stored level/verdict: both are
+   * derived from the evidence accumulated during this loop.
+   */
+  recordRun?(run: RepairRunRecorded): Promise<void> | void;
   /**
    * Persist project/version state from a recording build only. The adapter must
    * derive it from `build.verification`/`build.verdict` (see
@@ -85,6 +102,13 @@ export interface RepairLoopRequest {
   env?: Record<string, string | undefined>;
   now?: () => number;
   log?: (line: string) => void;
+  /** Product profile name and criteria, written into the run record. */
+  profile?: string;
+  criteria?: RunCriterion[];
+  branch?: string | null;
+  runId?: string;
+  /** Explicit demo/test simulation: evidence stays SIMULATED and level is capped. */
+  simulated?: boolean;
 }
 
 export type RepairLoopStatus =
@@ -98,7 +122,7 @@ export type RepairLoopFailureCode =
   | "REPAIR_LIMIT_REACHED"
   | "TIME_BUDGET_EXHAUSTED";
 
-export type RepairLoopResult =
+export type RepairLoopOutcome =
   | {
       ok: true;
       status: RepairLoopStatus;
@@ -120,6 +144,16 @@ export type RepairLoopResult =
       files: TurnFile[];
     };
 
+export type RepairLoopResult = RepairLoopOutcome & { runRecord: RepairRunRecorded };
+
+interface RunAccumulator {
+  startedAt: number | null;
+  simulated: boolean;
+  changes: Map<string, RunChange>;
+  evidence: Evidence[];
+  modelText: string | null;
+}
+
 function appliedSummaryFor(writes: TurnWrite[]): string {
   if (writes.length === 0) return "no file change";
   return `${writes.length} file(s) written (${writes.map((write) => write.path).join(", ")})`;
@@ -129,10 +163,65 @@ export async function runRepairLoop(
   request: RepairLoopRequest,
   ports: RepairLoopPorts,
 ): Promise<RepairLoopResult> {
+  const accumulator: RunAccumulator = {
+    startedAt: null,
+    simulated: request.simulated ?? false,
+    changes: new Map(),
+    evidence: [],
+    modelText: null,
+  };
+  const outcome = await runRepairLoopInternal(request, ports, accumulator);
+  const startedAt = accumulator.startedAt ?? Date.now();
+  if (outcome.build) {
+    accumulator.evidence.push({
+      level: "compiled",
+      verification: accumulator.simulated ? "SIMULATED" : outcome.build.verification,
+      verdict: outcome.build.verdict,
+      at: startedAt,
+      actor: "tool",
+      actorId: outcome.build.toolchain ?? "build",
+      tool: "build",
+      detail: `${outcome.build.command ?? "build"} exit ${outcome.build.exitCode ?? "n/a"}`,
+      criterion: null,
+    });
+  }
+  const criteria =
+    request.criteria && request.criteria.length > 0
+      ? request.criteria.map((criterion) => ({ ...criterion }))
+      : [{ id: "build", description: "the project builds with the real toolchain" }];
+  const derived = finalizeRunRecord({
+    id: request.runId ?? `run-${startedAt}`,
+    createdAt: startedAt,
+    profile: request.profile ?? request.project.name,
+    request: request.userMessage,
+    branch: request.branch ?? null,
+    criteria,
+    evidence: accumulator.evidence.map((entry) => ({ ...entry })),
+    changes: [...accumulator.changes.values()].map((change) => ({ ...change })),
+    modelText: accumulator.modelText,
+  });
+  const level = capSimulationLevel(derived.level, accumulator.simulated);
+  const status = deriveStatus(derived.record.evidence, level);
+  const runRecord: RepairRunRecorded = {
+    record: derived.record,
+    level,
+    status,
+    simulated: accumulator.simulated,
+  };
+  await ports.recordRun?.(runRecord);
+  return { ...outcome, runRecord };
+}
+
+async function runRepairLoopInternal(
+  request: RepairLoopRequest,
+  ports: RepairLoopPorts,
+  accumulator: RunAccumulator,
+): Promise<RepairLoopOutcome> {
   const env = request.env ?? process.env;
   const now = request.now ?? (() => Date.now());
   const log = request.log ?? (() => {});
   const startedAt = now();
+  accumulator.startedAt ??= startedAt;
   const timeBudgetMs = request.timeBudgetMs ?? DEFAULT_TIME_BUDGET_MS;
   const maxAttempts = Math.min(Math.max(request.maxAttempts ?? MAX_REPAIR_ATTEMPTS, 1), 4);
 
@@ -197,6 +286,7 @@ export async function runRepairLoop(
       };
     }
 
+    accumulator.modelText = turn.summary;
     const hasWrites = turn.writes.length > 0;
 
     if (!hasWrites && !turn.requestBuild) {
@@ -221,6 +311,25 @@ export async function runRepairLoop(
         summary: turn.summary,
       });
       appliedSummary = appliedSummaryFor(turn.writes);
+      for (const write of turn.writes) {
+        const change: RunChange = {
+          path: write.path,
+          kind: write.kind,
+          block: write.block,
+        };
+        accumulator.changes.set(`${change.kind}:${change.path}:${change.block ?? ""}`, change);
+      }
+      accumulator.evidence.push({
+        level: "written",
+        verification: accumulator.simulated ? "SIMULATED" : "REAL",
+        verdict: "SUCCESS",
+        at: startedAt,
+        actor: "tool",
+        actorId: "agent/applyWrites",
+        tool: "applyWrites",
+        detail: `attempt ${attempt}: ${appliedSummary}`,
+        criterion: null,
+      });
 
       const safety = turn.safety;
       await ports.record({

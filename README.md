@@ -8,15 +8,16 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 5 complete** (native tools plus a stdio MCP server with two
-> declared groups, a structured result envelope, serial-capture sessions, and a
-> tool-enforced flash gate). The orchestrator, the CLI and the demo do not exist
-> yet; see [What is not here yet](#what-is-not-here-yet). Nothing in this README
-> describes them as working.
+> **State: Phase 6 complete** (native tools, a stdio MCP server with two declared
+> groups, a structured result envelope, serial-capture sessions, a tool-enforced
+> flash gate, and a validated `RunRecord` emitted by the repair loop). The
+> orchestrator, the CLI and the demo do not exist yet; see
+> [What is not here yet](#what-is-not-here-yet). Nothing in this README describes
+> them as working.
 >
 > There is no board and no cross toolchain in the development environment: every
 > real tool answers `NOT_AVAILABLE` with the reason, and the hardware test is
-> skipped. The MCP integration test uses an explicit SIMULATED mode and never
+> skipped. The MCP integration test uses the explicit `--simulate` flag and never
 > claims it ran on a board.
 
 ## Non-negotiable rules
@@ -33,7 +34,11 @@ that the agent **cannot claim anything it has not measured**.
 | A busy probe or a blocked/unreachable core is a FAIL; unknown is `NOT_AVAILABLE` with the reason | `tools/doctor.ts` |
 | Serial capture must start before flash/reset; a late capture is marked incomplete; `status` reports the session and missed events | `tools/serialCapture.ts`, `tools/mcp/server.ts` |
 | `flash` refuses unless the current run record has a `memory_map_check` SUCCESS for the same ELF SHA-256 and the latest doctor did not mark the target unreliable | `tools/mcp/runState.ts`, `tools/mcp/server.ts` |
+| `flash` accepts an ELF, or a `.bin`/`.hex` only when the tool derived it from a checked ELF; the run record stores `sha256 ELF → sha256 bin/hex`, and an external binary without that derivation is refused | `tools/mcp/artifacts.ts`, `tools/mcp/runState.ts`, `tools/mcp/server.ts` |
+| `debug` uses a GDB allowlist: breakpoints, halt/continue, RAM/register reads and writes, detach; `load`, `restore` into FLASH, programming monitors and OpenOCD/probe-rs flash commands are refused | `tools/debugPolicy.ts`, `tools/debug.ts`, `tools/mcp/server.ts` |
+| `target_test` that loads firmware passes through the same flash gate as `flash` | `tools/mcp/server.ts`, `tools/mcp/runState.ts` |
 | Every MCP response carries `verification`, `verdict`, `actor` and structured `evidence`; the read-only and side-effect groups are declared in the server instructions and annotations | `tools/mcp/server.ts` |
+| `--simulate` forces `SIMULATED` on every response, marks the run record simulated, and caps the level at `compiled` | `tools/mcp/index.ts`, `tools/mcp/runState.ts`, `core/verificationLevels.ts` |
 | Every allocated section's VMA is inside a declared region of the right type, and every section with file bytes and an LMA has its LMA inside FLASH; a section copied to RAM is valid whatever its flags | `tools/memoryMap.ts`, `core/elfImage.ts` |
 | The Cortex-M vector table has an 8-byte-aligned initial SP in RAM (the inclusive region end is valid) and a Thumb reset handler in FLASH | `tools/memoryMap.ts` |
 | `chip.vettori`, when present, is a hex address inside a declared FLASH region | `core/profile.ts`, `tools/memoryMap.ts` |
@@ -46,10 +51,12 @@ that the agent **cannot claim anything it has not measured**.
 | A run record cannot store a level or a verdict: the schema rejects those fields | `core/runRecord.ts` |
 | Existing files change only inside `// [AI_START_<block>]`, for blocks declared in the profile; one bad edit writes nothing | `core/blockPatch.ts`, `agent/turn.ts` |
 | Every job works on its own branch and a failure discards it | `core/vcs.ts`, `tools/gitVcs.ts` |
+| The repair loop emits a validated `RunRecord` through `recordRun`; its level and status are derived from the evidence, never from the model or the build alone | `agent/repairLoop.ts`, `core/runRecord.ts` |
 
-Not yet implemented, and deliberately absent from the code: on-target observation
-wired into the loop, `ModelRuntime`, the CLI and the demo. The hardware tools
-exist but have never run on a board in this environment.
+Not yet implemented, and deliberately absent from the code: hardware tools wired
+into the repair loop, on-target observation produced by the loop, `ModelRuntime`,
+the CLI and the demo. The hardware tools exist but have never run on a board in
+this environment.
 
 ## Layout
 
@@ -71,19 +78,22 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
                flash.ts       STM32_Programmer_CLI | openocd | probe-rs | west
                readState.ts   stable | progressing, declared by the caller
                debug.ts       GDB batch with explicit commands
+               debugPolicy.ts allowlist for GDB commands; no FLASH writes
                serialCapture.ts  session started before flash/reset; detects late starts
                memoryMap.ts   region VMA/LMA checks, vector table, entry point, SHA-256
                targetTest.ts  on-target test port; NOT_AVAILABLE until wired
                gitVcs.ts      real git implementation of VcsPort
                mcp/           stdio MCP server, declared tool groups, run-state
-                              flash gate and structured result envelopes
+                              flash gate, ELF → bin/hex derivation, structured
+                              result envelopes and `--simulate`
                runner/        local HTTP runner (build / doctor / export / turn)
-                              and Zephyr verification. The Phase 5 MCP surface is
-                              separate and invoked over stdio.
+                              and Zephyr verification. The MCP surface is separate
+                              and invoked over stdio.
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
-               repairLoop.ts  the loop: build → compiler error → patch → rebuild
+               repairLoop.ts  the loop: build → compiler error → patch → rebuild;
+                              emits the validated RunRecord through `recordRun`
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         266 tests, 9 skipped without a board / toolchain / git opt-in
+tests/         281 tests: 272 pass, 9 skipped without a board / toolchain / git opt-in
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -127,7 +137,7 @@ chip:
 
 ```bash
 bun install
-bun test                     # 257 pass, 9 skip (board / toolchain / git opt-in)
+bun test                     # 272 pass, 9 skip (281 tests; board / toolchain / git opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -163,6 +173,8 @@ which is the intended behaviour.
 `PY_BENCH_MCP_PROFILE`) and a project base directory with `--project-dir` (or
 `PY_BENCH_MCP_PROJECT_DIR`). The project directory defaults to the current
 working directory and the profile defaults to `profiles/demo-board.yaml` under it.
+`--simulate` is the only simulation switch: it never comes from an environment
+variable, and it is intended for demos and the MCP integration test.
 
 The server declares two groups in its instructions and in every tool description:
 
@@ -187,6 +199,22 @@ the same bytes, is refused with an explanation of what to run. If the latest
 doctor run reports a reliable target. Only a successful flash records a `flash`
 event on the serial session.
 
+A `.bin` or `.hex` is accepted only when the tool derived it from a checked ELF:
+`flash` writes a temporary image from the ELF's FLASH sections, compares its
+SHA-256 with the supplied file, and records `sha256 ELF → sha256 bin/hex`. An
+external image without a matching derivation is refused, and a byte mismatch is
+refused too. `target_test` uses the same gate whenever it loads firmware.
+
+### Debug without FLASH writes
+
+`debug` first passes every command through `tools/debugPolicy.ts`. The allowlist
+covers breakpoints, halt/continue, detach, reads, RAM writes and register writes.
+`load`, `restore` with a FLASH address, programming `monitor` commands
+(`program`, `flash write_image`, …) and OpenOCD/probe-rs flash commands are
+refused with the reason before GDB is even looked up. Writes require an explicit
+numeric RAM address: symbolic or arithmetic expressions that could resolve into
+FLASH are refused.
+
 ### Serial session
 
 `serial_capture` is one session per MCP server: `start`, `stop`, `status`.
@@ -198,24 +226,31 @@ events that happened before it. Events that happen after `stop` are reported in
 
 ### MCP tests
 
-The integration test launches `bun run mcp` through the official MCP stdio client,
-lists all nine tools and calls every one at least once. It selects
-`PY_BENCH_MCP_SIMULATE=1`, an explicit test-only double: every tool that does not
-read real files stays `SIMULATED`, and the flash test still passes through the
-same SHA-256 gate. A normal run never selects this mode and never turns it into
-`REAL`.
+The integration test launches `bun run mcp --simulate` through the official MCP
+stdio client, lists all nine tools and calls every one at least once. The flag is
+the explicit test-only double: every response is `SIMULATED`, every evidence
+entry stays `SIMULATED`, and the flash test still passes through the same
+SHA-256 gate. A normal run never selects this mode and never turns it into
+`REAL`; the run record is marked simulated with `maxLevel = "compiled"`.
 
 ## How the loop reports
 
 `agent/repairLoop.ts` has no database and no Convex dependency: persistence goes
-through `RepairLoopPorts` (`applyWrites`, `record`, `onBuildRecorded`, `say`).
-It returns a `RepairLoopResult` whose `status` is one of `ANSWER_ONLY`,
-`CHANGES_APPLIED`, `SUCCESS`, `BUILD_NOT_AVAILABLE`, or a failure code such as
-`PATCH_FAILED`, `REPAIR_LIMIT_REACHED`, `TIME_BUDGET_EXHAUSTED`.
+through `RepairLoopPorts` (`applyWrites`, `record`, `onBuildRecorded`, `say`,
+and the Phase 6 `recordRun`). It returns a `RepairLoopResult` whose `status` is
+one of `ANSWER_ONLY`, `CHANGES_APPLIED`, `SUCCESS`, `BUILD_NOT_AVAILABLE`, or a
+failure code such as `PATCH_FAILED`, `REPAIR_LIMIT_REACHED`,
+`TIME_BUDGET_EXHAUSTED`.
 
-The adapter that stores runs must derive project state from the recorded build
-(`isVerifiedSuccess` / `projectStatusFor`), never from the model's prose. That
-contract is what Phase 2 turns into a validated run record.
+Every outcome also carries `runRecord`: `{ record, level, status, simulated }`,
+where `record` is the validated `RunRecord` with the profile name, request,
+criteria, applied changes, model transcript and structured evidence. The loop records `written` evidence only after `applyWrites` persisted
+the files, and `compiled` evidence only from the final build result; evidence
+from a simulated run is `SIMULATED`. `recordRun` receives the record plus the
+level and status derived from it. The stored record contains no level or verdict:
+`validateRunRecord` rejects those fields. The adapter that stores project state
+still derives it from the recorded build (`isVerifiedSuccess` /
+`projectStatusFor`), never from the model's prose.
 
 ## Target checks and capture order
 
@@ -257,11 +292,11 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phases 6–9 of the plan: `ModelRuntime` orchestrator (Claude Agent SDK + the
-existing `core/llmClient.ts`), `py job` CLI and demo. The tools are not wired
-into the repair loop yet: the loop still emits no `RunRecord` (that is Phase 6),
-and none of the hardware tools has run against a real board here. The MCP run
-record is session-scoped and is not yet persisted as the Phase 6 run record.
+Phases 7–9 of the plan: `ModelRuntime` orchestrator (Claude Agent SDK + the
+existing `core/llmClient.ts`), `py job` CLI and demo. Phase 6 emits the validated
+`RunRecord`, but the hardware tools are not wired into the repair loop yet, and
+none of them has run against a real board here. The MCP run record remains
+session-scoped; it is not the persistent store for repair-loop records.
 
 `memory_map_check` reports per-region usage only after the VMA/LMA checks; a
 stripped ELF with no section headers is `NOT_AVAILABLE`, not a guess from the

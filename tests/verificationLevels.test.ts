@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  capSimulationLevel,
   deriveLevel,
   deriveStatus,
   describeLevel,
@@ -26,6 +27,15 @@ function evidence(level: VerificationLevel, overrides: Partial<Evidence> = {}): 
 const base = () => [evidence("written"), evidence("compiled"), evidence("flashed")];
 
 describe("verification levels", () => {
+  test("simulation is capped at compiled", () => {
+    expect(capSimulationLevel("flashed", true)).toBe("compiled");
+    expect(capSimulationLevel("observed", true)).toBe("compiled");
+    expect(capSimulationLevel("confirmed", true)).toBe("compiled");
+    expect(capSimulationLevel("compiled", true)).toBe("compiled");
+    expect(capSimulationLevel("flashed", false)).toBe("flashed");
+    expect(capSimulationLevel(null, true)).toBeNull();
+  });
+
   test("nothing in the record means nothing was proven", () => {
     expect(deriveLevel([])).toBeNull();
     expect(describeLevel(null)).toContain("nothing was proven");
