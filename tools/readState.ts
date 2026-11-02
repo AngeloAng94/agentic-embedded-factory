@@ -1,13 +1,32 @@
 /**
- * `read_state`, with the double read the product requires.
+ * `read_state`, with the mode the caller must declare.
  *
- * Two independent reads must return the same bytes. A mismatch is a failure,
- * not an average: a flaky probe must never be reported as stable state.
- * Simulated reads stay SIMULATED and can never become evidence.
+ *   stable       two reads must be identical: a halted core, configuration
+ *                registers, a checksum that must not move.
+ *   progressing  two reads must differ in the expected direction: a counter
+ *                that advances proves the core is executing.
+ *
+ * A stable read that changes is a failure. A progressing read that does not
+ * move, or moves backwards, is a failure too. Two different values on a stable
+ * read are never averaged. Simulated reads stay SIMULATED.
+ *
+ * If the doctor found that the flash does not match the expected ELF, the
+ * caller passes `target.reliable = false` and this tool refuses to report a
+ * state: reads after a wrong image are not evidence.
  */
 import type { ProductProfile } from "../core/profile";
-import { notAvailable, toolFailed, toolOk, type ToolOutcome } from "../core/toolResult";
+import {
+  invalidRequest,
+  notAvailable,
+  toolFailed,
+  toolOk,
+  type ToolOutcome,
+} from "../core/toolResult";
 import { runCommand, systemResolver, type BinaryResolver, type ExecResult } from "./exec";
+
+export type ReadStateMode = "stable" | "progressing";
+export type ReadDirection = "increasing" | "decreasing";
+export type ReadRelation = "equal" | "increasing" | "decreasing";
 
 export interface ReadOnceOk {
   ok: true;
@@ -19,43 +38,127 @@ export interface ReadOnceOk {
 export type ReadOnceResult = ReadOnceOk | { ok: false; reason: string };
 export type ReadOnce = () => Promise<ReadOnceResult>;
 
-export interface ReadStateValue {
-  first: number[];
-  second: number[];
-  stable: boolean;
+export interface ReadStateOptions {
+  mode: ReadStateMode;
+  /** Required when mode is `progressing`. */
+  direction?: ReadDirection;
+  /** Result of the doctor's target checks; false refuses the read. */
+  target?: { reliable: boolean; reason?: string | null };
 }
 
-export async function readStateTwice(readOnce: ReadOnce): Promise<ToolOutcome<ReadStateValue>> {
-  let first: ReadOnceResult;
-  try {
-    first = await readOnce();
-  } catch (error) {
-    return notAvailable(`read failed: ${error instanceof Error ? error.message : String(error)}`);
+export interface ReadStateValue {
+  mode: ReadStateMode;
+  first: number[];
+  second: number[];
+  /** Unsigned little-endian value as a decimal string. */
+  firstValue: string;
+  secondValue: string;
+  relation: ReadRelation;
+}
+
+/** Unsigned little-endian integer of the read bytes. */
+export function bytesToUnsigned(bytes: readonly number[]): bigint {
+  let value = 0n;
+  for (let index = bytes.length - 1; index >= 0; index -= 1) {
+    value = (value << 8n) | BigInt((bytes[index] ?? 0) & 0xff);
   }
-  if (!first.ok) return notAvailable(first.reason);
+  return value;
+}
 
-  let second: ReadOnceResult;
+function sameBytes(first: readonly number[], second: readonly number[]): boolean {
+  return first.length === second.length && first.every((byte, index) => byte === second[index]);
+}
+
+async function readOne(
+  readOnce: ReadOnce,
+  label: string,
+): Promise<ToolOutcome<ReadOnceOk>> {
   try {
-    second = await readOnce();
+    const result = await readOnce();
+    if (!result.ok) return notAvailable(`${label}: ${result.reason}`);
+    return toolOk(result, result.verification);
   } catch (error) {
-    return notAvailable(`second read failed: ${error instanceof Error ? error.message : String(error)}`);
+    return notAvailable(`${label}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!second.ok) return notAvailable(second.reason);
+}
 
-  const same =
-    first.bytes.length === second.bytes.length &&
-    first.bytes.every((byte, index) => byte === second.bytes[index]);
-
-  if (!same) {
+export async function readState(
+  readOnce: ReadOnce,
+  options: ReadStateOptions,
+): Promise<ToolOutcome<ReadStateValue>> {
+  if (!options || (options.mode !== "stable" && options.mode !== "progressing")) {
+    return invalidRequest('read_state mode is required: "stable" or "progressing"');
+  }
+  if (
+    options.mode === "progressing" &&
+    options.direction !== "increasing" &&
+    options.direction !== "decreasing"
+  ) {
+    return invalidRequest('progressing reads need a direction: "increasing" or "decreasing"');
+  }
+  if (options.target && options.target.reliable === false) {
     return toolFailed(
-      `unstable read: first read ${first.bytes.length} byte(s) [${first.bytes.join(" ")}], second read ${second.bytes.length} byte(s) [${second.bytes.join(" ")}]`,
+      `target reads are unreliable: ${options.target.reason ?? "the flash does not match the expected ELF"}`,
     );
   }
 
-  const verification =
-    first.verification === "REAL" && second.verification === "REAL" ? "REAL" : "SIMULATED";
+  const first = await readOne(readOnce, "first read");
+  if (!first.ok) return first;
+  const second = await readOne(readOnce, "second read");
+  if (!second.ok) return second;
 
-  return toolOk({ first: first.bytes, second: second.bytes, stable: true }, verification);
+  const firstValue = bytesToUnsigned(first.value.bytes);
+  const secondValue = bytesToUnsigned(second.value.bytes);
+  const equal = sameBytes(first.value.bytes, second.value.bytes);
+  const relation: ReadRelation =
+    secondValue === firstValue ? "equal" : secondValue > firstValue ? "increasing" : "decreasing";
+
+  const verification =
+    first.value.verification === "REAL" && second.value.verification === "REAL"
+      ? "REAL"
+      : "SIMULATED";
+
+  if (options.mode === "stable") {
+    if (!equal) {
+      return toolFailed(
+        `stable read failed: first read [${first.value.bytes.join(" ")}], second read [${second.value.bytes.join(" ")}]`,
+      );
+    }
+    return toolOk(
+      {
+        mode: "stable",
+        first: first.value.bytes,
+        second: second.value.bytes,
+        firstValue: firstValue.toString(),
+        secondValue: secondValue.toString(),
+        relation,
+      },
+      verification,
+    );
+  }
+
+  if (relation === "equal") {
+    return toolFailed(
+      `progressing read failed: the value did not change (${firstValue.toString()}), the core is not advancing`,
+    );
+  }
+  if (relation !== options.direction) {
+    return toolFailed(
+      `progressing read failed: value moved ${relation}, expected ${options.direction} (${firstValue.toString()} → ${secondValue.toString()})`,
+    );
+  }
+
+  return toolOk(
+    {
+      mode: "progressing",
+      first: first.value.bytes,
+      second: second.value.bytes,
+      firstValue: firstValue.toString(),
+      secondValue: secondValue.toString(),
+      relation,
+    },
+    verification,
+  );
 }
 
 /** Parses `x/4xb` output: `0x20000000:\t0x12\t0x34`. */

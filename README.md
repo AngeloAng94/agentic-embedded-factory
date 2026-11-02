@@ -8,11 +8,12 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 3 complete** (native tools: profile doctor, build, flash,
-> `read_state`, GDB batch, serial capture, on-target test; CMake and Zephyr
-> `west` build adapters). The orchestrator, the CLI, the MCP server and the demo
-> do not exist yet; see [What is not here yet](#what-is-not-here-yet). Nothing in
-> this README describes them as working.
+> **State: Phase 4 complete** (native tools: profile doctor with target checks,
+> build, flash, `read_state` with declared mode, GDB batch, serial capture
+> session, on-target test, `memory_map_check`; CMake and Zephyr `west` build
+> adapters). The orchestrator, the CLI, the MCP server and the demo do not exist
+> yet; see [What is not here yet](#what-is-not-here-yet). Nothing in this README
+> describes them as working.
 >
 > There is no board and no cross toolchain in the development environment: every
 > real tool answers `NOT_AVAILABLE` with the reason, and the hardware test is
@@ -28,7 +29,11 @@ that the agent **cannot claim anything it has not measured**.
 | A project is `verified` only after a real successful build | `core/buildStatus.ts → projectStatusFor` |
 | No build runner → `NOT_AVAILABLE`, never a simulated success | `core/buildDispatch.ts` |
 | No binary, no debugger, no serial helper → `NOT_AVAILABLE` with the reason | `tools/doctor.ts`, `tools/build.ts`, `tools/flash.ts`, `tools/debug.ts`, `tools/serialCapture.ts` |
-| `read_state` needs two identical reads; a mismatch is a failure | `tools/readState.ts` |
+| `read_state` declares its mode: `stable` needs identical reads, `progressing` needs movement in the declared direction | `tools/readState.ts` |
+| A flash mismatch is a doctor FAIL and makes every later read unreliable (`read_state` refuses) | `tools/doctor.ts`, `tools/probe.ts`, `tools/readState.ts` |
+| A busy probe or a blocked/unreachable core is a FAIL; unknown is `NOT_AVAILABLE` with the reason | `tools/doctor.ts` |
+| Serial capture must start before flash/reset; a late capture is marked incomplete | `tools/serialCapture.ts` |
+| FLASH/RAM usage comes from the ELF, and over budget is a FAILURE | `tools/memoryMap.ts`, `core/elfImage.ts` |
 | A profile cannot choose a flash tool without its target or a Zephyr build without a board | `core/profile.ts` |
 | The model proposes; only validated patches reach the files, all-or-nothing | `agent/turn.ts` |
 | Repair stops at 3 attempts, then the run fails and says so | `agent/repairLoop.ts` |
@@ -39,8 +44,8 @@ that the agent **cannot claim anything it has not measured**.
 | Every job works on its own branch and a failure discards it | `core/vcs.ts`, `tools/gitVcs.ts` |
 
 Not yet implemented, and deliberately absent from the code: on-target observation
-wired into the loop, memory-map checking, `ModelRuntime`, the CLI, MCP and the
-demo. The hardware tools exist but have never run on a board in this environment.
+wired into the loop, `ModelRuntime`, the CLI, MCP and the demo. The hardware
+tools exist but have never run on a board in this environment.
 
 ## Layout
 
@@ -54,13 +59,16 @@ core/          types, verdicts, build engine + dispatch, LLM client (Ollama /
                profile.ts           product profile parser + total validation
                blockPatch.ts        edits inside [AI_START_*] markers only
                toolResult.ts        REAL / SIMULATED / NOT_AVAILABLE outcomes
+               elfImage.ts          ELF32/64 segments and sections, no readelf
 tools/         exec.ts        argv execution (no shell) + PATH resolver
-               doctor.ts      profile-driven checks: PASS/MISSING, READY if all required
+               doctor.ts      environment checks + flash/ELF, probe and core state
+               probe.ts       GDB probe: busy, core state, flash dump
                build.ts       cmake (STM32) | zephyr-west (Zephyr) from the profile
                flash.ts       STM32_Programmer_CLI | openocd | probe-rs | west
-               readState.ts   double read over GDB; mismatch = failure
+               readState.ts   stable | progressing, declared by the caller
                debug.ts       GDB batch with explicit commands
-               serialCapture.ts  capture command from the profile
+               serialCapture.ts  session started before flash/reset; detects late starts
+               memoryMap.ts   FLASH/RAM budget, overlaps, entry point
                targetTest.ts  on-target test port; NOT_AVAILABLE until wired
                gitVcs.ts      real git implementation of VcsPort
                runner/        local HTTP runner (build / doctor / export / turn)
@@ -69,7 +77,7 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
                repairLoop.ts  the loop: build → compiler error → patch → rebuild
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         193 tests, 7 skipped without a board / toolchain / git opt-in
+tests/         233 tests, 8 skipped without a board / toolchain / git opt-in
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -89,7 +97,7 @@ under `core/`, `tools/` and `agent/` imports only Bun and Node built-ins.
 
 ```bash
 bun install
-bun test                     # 193 pass, 7 skip (board / toolchain / git opt-in)
+bun test                     # 225 pass, 8 skip (board / toolchain / git opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -127,6 +135,24 @@ The adapter that stores runs must derive project state from the recorded build
 (`isVerifiedSuccess` / `projectStatusFor`), never from the model's prose. That
 contract is what Phase 2 turns into a validated run record.
 
+## Target checks and capture order
+
+`read_state` has no default mode. `stable` is for a halted core or configuration
+registers (two identical reads); `progressing` is for a counter that proves the
+core executes and requires `direction: "increasing" | "decreasing"`. A stable
+read that moves, a progressing read that does not move, and movement in the
+wrong direction are all failures.
+
+The doctor compares the flash with the expected ELF through GDB, reports whether
+the probe is busy and whether the core is running, halted, blocked or
+unreachable, and sets `target.readsReliable`. A flash mismatch marks later
+readings unreliable; `read_state` accepts that flag and refuses to report them.
+Without gdb or hardware every target check is `NOT_AVAILABLE` with the reason.
+
+The serial session must be started **before** flash or reset. `stop()` reports
+`complete: false` and lists the missed events when a flash/reset happened before
+the capture started, because the boot banner may contain the acceptance criteria.
+
 ## Legacy snapshot and the `embedfactory-v1` tag
 
 The tag could **not** be created here: git commands are blocked in this
@@ -136,11 +162,14 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phases 4–9 of the plan: memory map check, MCP server, `ModelRuntime`
-orchestrator (Claude Agent SDK + the existing `core/llmClient.ts`), `py job` CLI,
-demo. The Phase 3 tools are not wired into the repair loop yet: the loop still
-emits no `RunRecord` (that is Phase 6), and none of the hardware tools has run
-against a real board here.
+Phases 5–9 of the plan: MCP server, `ModelRuntime` orchestrator (Claude Agent
+SDK + the existing `core/llmClient.ts`), `py job` CLI, demo. The tools are not
+wired into the repair loop yet: the loop still emits no `RunRecord` (that is
+Phase 6), and none of the hardware tools has run against a real board here.
+
+`memory_map_check` reads FLASH usage from every allocated section that has file
+bytes and RAM usage from every allocated writable section; a stripped ELF with
+no section headers is `NOT_AVAILABLE`, not a guess from the file size.
 
 The web workspace and the landing page were removed from the active tree on
 purpose: this is a bench/CI tool now, not a web app. There is no dev server.

@@ -16,7 +16,8 @@ import { loadProfile, type ProductProfile } from "../core/profile";
 import { runBuild } from "../tools/build";
 import { runProfileDoctor } from "../tools/doctor";
 import { runFlash } from "../tools/flash";
-import { gdbReader, readStateTwice } from "../tools/readState";
+import { checkMemoryMap } from "../tools/memoryMap";
+import { gdbReader, readState } from "../tools/readState";
 
 const enabled = process.env.PY_BENCH_ALLOW_REAL_HW === "1";
 const profilePath = process.env.PY_BENCH_HW_PROFILE ?? "";
@@ -40,13 +41,32 @@ function hwProfile(): ProductProfile {
 }
 
 describe.skipIf(missing !== null)("real hardware", () => {
-  test("doctor reports READY", () => {
-    const report = runProfileDoctor(hwProfile());
+  test("doctor reports READY for the environment and the target", () => {
+    const report = runProfileDoctor(hwProfile(), { artifactPath });
     const missingChecks = report.checks
       .filter((check) => check.required && check.status === "MISSING")
       .map((check) => `${check.label}: ${check.detail}`);
     if (report.state !== "READY") {
       throw new Error(`environment NOT_READY:\n${missingChecks.join("\n")}`);
+    }
+
+    const targetProblems = report.target.checks
+      .filter((check) => check.status !== "PASS")
+      .map((check) => `${check.label}: ${check.status} — ${check.detail}`);
+    if (report.target.state !== "READY") {
+      throw new Error(`target NOT_READY:\n${targetProblems.join("\n")}`);
+    }
+    expect(report.target.readsReliable).toBe(true);
+  });
+
+  test("memory map fits the profile", () => {
+    const result = checkMemoryMap(hwProfile(), { artifactPath });
+    if (!result.ok) throw new Error(`${result.code}: ${result.reason}`);
+    const failed = result.value.checks
+      .filter((check) => check.status !== "PASS")
+      .map((check) => `${check.label}: ${check.status} — ${check.detail}`);
+    if (result.value.verdict !== "SUCCESS") {
+      throw new Error(`memory map ${result.value.verdict}:\n${failed.join("\n")}`);
     }
   });
 
@@ -67,9 +87,9 @@ describe.skipIf(missing !== null)("real hardware", () => {
   test("read_state is stable across two reads", async () => {
     const address = process.env.PY_BENCH_HW_ADDRESS ?? "0x20000000";
     const length = Number(process.env.PY_BENCH_HW_LENGTH ?? "4");
-    const result = await readStateTwice(gdbReader(hwProfile(), { address, length }));
+    const result = await readState(gdbReader(hwProfile(), { address, length }), { mode: "stable" });
     if (!result.ok) throw new Error(`${result.code}: ${result.reason}`);
     expect(result.verification).toBe("REAL");
-    expect(result.value.stable).toBe(true);
+    expect(result.value.relation).toBe("equal");
   });
 });

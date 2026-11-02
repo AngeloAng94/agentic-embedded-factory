@@ -6,7 +6,7 @@
  * NOT_AVAILABLE with the reason, never a fake success.
  */
 
-export type ToolErrorCode = "NOT_AVAILABLE" | "FAILED" | "INVALID_PROFILE";
+export type ToolErrorCode = "NOT_AVAILABLE" | "FAILED" | "INVALID_PROFILE" | "INVALID_REQUEST";
 
 export type ToolOutcome<T> =
   | { ok: true; verification: "REAL" | "SIMULATED"; value: T }
@@ -26,4 +26,8 @@ export function toolFailed<T>(reason: string): ToolOutcome<T> {
 
 export function invalidProfile<T>(reason: string): ToolOutcome<T> {
   return { ok: false, code: "INVALID_PROFILE", reason };
+}
+
+export function invalidRequest<T>(reason: string): ToolOutcome<T> {
+  return { ok: false, code: "INVALID_REQUEST", reason };
 }

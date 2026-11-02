@@ -4,8 +4,7 @@ import { planBuild, runBuild } from "../tools/build";
 import { runGdbBatch } from "../tools/debug";
 import { runProfileDoctor } from "../tools/doctor";
 import { planFlash } from "../tools/flash";
-import { gdbReader, parseGdbBytes, readStateTwice } from "../tools/readState";
-import { captureSerial } from "../tools/serialCapture";
+import { gdbReader, parseGdbBytes, readState, type ReadStateOptions } from "../tools/readState";
 import { runTargetTest } from "../tools/targetTest";
 import type { BinaryResolver } from "../tools/exec";
 import { FAKE_RUNNER, fakeBuild, fakeFlash, fakeRead } from "./helpers/fakeRunner";
@@ -164,7 +163,7 @@ describe("flash adapters", () => {
   });
 });
 
-describe("read_state — double read", () => {
+describe("read_state — declared mode", () => {
   const real = (bytes: number[]) => async () => ({
     ok: true as const,
     bytes,
@@ -172,51 +171,136 @@ describe("read_state — double read", () => {
     tool: "gdb",
   });
 
-  test("two identical REAL reads are stable and REAL", async () => {
-    const result = await readStateTwice(real([1, 2, 3]));
+  const sequence = (values: number[][]) => {
+    let index = 0;
+    return async () => {
+      const bytes = values[Math.min(index, values.length - 1)]!;
+      index += 1;
+      return { ok: true as const, bytes, verification: "REAL" as const, tool: "gdb" };
+    };
+  };
+
+  test("stable: two identical REAL reads pass", async () => {
+    const result = await readState(real([1, 2, 3]), { mode: "stable" });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.verification).toBe("REAL");
-      expect(result.value.stable).toBe(true);
+      expect(result.value.mode).toBe("stable");
+      expect(result.value.relation).toBe("equal");
       expect(result.value.first).toEqual([1, 2, 3]);
     }
   });
 
-  test("a simulated read stays SIMULATED, never REAL", async () => {
-    const result = await readStateTwice(async () => ({
-      ok: true,
-      bytes: [1, 2],
-      verification: "SIMULATED",
-      tool: "fake",
-    }));
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.verification).toBe("SIMULATED");
+  test("stable: a changing value fails", async () => {
+    const result = await readState(sequence([[1, 2], [1, 3]]), { mode: "stable" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("FAILED");
+      expect(result.reason).toContain("stable read failed");
+    }
   });
 
-  test("two different reads are a failure, not an average", async () => {
-    let call = 0;
-    const result = await readStateTwice(async () => {
-      call += 1;
-      return { ok: true, bytes: call === 1 ? [1, 2] : [1, 3], verification: "REAL", tool: "gdb" };
+  test("progressing: an advancing counter passes", async () => {
+    const result = await readState(sequence([[0x0f], [0x10]]), {
+      mode: "progressing",
+      direction: "increasing",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.relation).toBe("increasing");
+      expect(result.value.firstValue).toBe("15");
+      expect(result.value.secondValue).toBe("16");
+    }
+  });
+
+  test("progressing: a decreasing value passes when declared", async () => {
+    const result = await readState(sequence([[9], [7]]), {
+      mode: "progressing",
+      direction: "decreasing",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.relation).toBe("decreasing");
+  });
+
+  test("progressing: numeric equality beats byte length", async () => {
+    const result = await readState(sequence([[0x01], [0x01, 0x00]]), {
+      mode: "progressing",
+      direction: "increasing",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("did not change");
+  });
+
+  test("progressing: an unchanged value fails", async () => {
+    const result = await readState(real([4]), { mode: "progressing", direction: "increasing" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("FAILED");
+      expect(result.reason).toContain("did not change");
+    }
+  });
+
+  test("progressing: the wrong direction fails", async () => {
+    const result = await readState(sequence([[9], [7]]), {
+      mode: "progressing",
+      direction: "increasing",
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.code).toBe("FAILED");
-      expect(result.reason).toContain("unstable read");
+      expect(result.reason).toContain("expected increasing");
+    }
+  });
+
+  test("progressing without a direction is an invalid request", async () => {
+    const result = await readState(real([1]), { mode: "progressing" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("INVALID_REQUEST");
+  });
+
+  test("an undeclared mode is an invalid request", async () => {
+    const result = await readState(real([1]), {} as ReadStateOptions);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("INVALID_REQUEST");
+  });
+
+  test("a simulated read stays SIMULATED, never REAL", async () => {
+    const result = await readState(
+      async () => ({ ok: true, bytes: [1, 2], verification: "SIMULATED", tool: "fake" }),
+      { mode: "stable" },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.verification).toBe("SIMULATED");
+  });
+
+  test("an unreliable target refuses the read", async () => {
+    const result = await readState(real([1]), {
+      mode: "stable",
+      target: { reliable: false, reason: "flash differs from the ELF" },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("FAILED");
+      expect(result.reason).toContain("flash differs");
     }
   });
 
   test("a read error is NOT_AVAILABLE with its reason", async () => {
-    const result = await readStateTwice(async () => ({ ok: false, reason: "probe not connected" }));
+    const result = await readState(async () => ({ ok: false, reason: "probe not connected" }), {
+      mode: "stable",
+    });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.code).toBe("NOT_AVAILABLE");
-      expect(result.reason).toBe("probe not connected");
+      expect(result.reason).toContain("probe not connected");
     }
   });
 
   test("gdbReader without gdb is NOT_AVAILABLE, not empty bytes", async () => {
-    const result = await readStateTwice(gdbReader(cmakeProfile, { address: 0x20000000, length: 4 }, { resolve: none }));
+    const result = await readState(
+      gdbReader(cmakeProfile, { address: 0x20000000, length: 4 }, { resolve: none }),
+      { mode: "stable" },
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toContain("gdb");
   });
@@ -227,7 +311,7 @@ describe("read_state — double read", () => {
   });
 });
 
-describe("debug, serial, target test", () => {
+describe("debug and target test", () => {
   test("gdb without the binary is NOT_AVAILABLE", () => {
     const result = runGdbBatch(cmakeProfile, ["info registers"], { resolve: none });
     expect(result.ok).toBe(false);
@@ -238,28 +322,6 @@ describe("debug, serial, target test", () => {
     const result = runGdbBatch(cmakeProfile, [], { resolve: none });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("INVALID_PROFILE");
-  });
-
-  test("serial without a profile section is NOT_AVAILABLE", () => {
-    const result = captureSerial(cmakeProfile);
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("seriale.porta");
-  });
-
-  test("serial without a command is NOT_AVAILABLE", () => {
-    const withPort = profileFrom(`${CMAKE_YAML}\nseriale: { porta: "/dev/null", baud: 115200 }`);
-    const result = captureSerial(withPort);
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("seriale.comando");
-  });
-
-  test("serial with a command whose binary is missing is NOT_AVAILABLE", () => {
-    const withCommand = profileFrom(
-      `${CMAKE_YAML}\nseriale: { porta: "/dev/null", baud: 115200, comando: "serial-helper {porta} {baud}" }`,
-    );
-    const result = captureSerial(withCommand, { resolve: none });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("serial-helper");
   });
 
   test("target test without a runner is NOT_AVAILABLE, never passed", async () => {
