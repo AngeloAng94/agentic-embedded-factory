@@ -93,6 +93,7 @@ export interface RunReportMetadata {
   restoredTo?: string | null;
   kept?: boolean | null;
   knownIssuesPath?: string | null;
+  pendingIssuesPath?: string | null;
 }
 
 export function formatRunReport(
@@ -133,6 +134,9 @@ export function formatRunReport(
   }
   if (metadata.knownIssuesPath) {
     lines.push(`- Known issues: ${metadata.knownIssuesPath}`);
+  }
+  if (metadata.pendingIssuesPath) {
+    lines.push(`- Known issues proposte: ${metadata.pendingIssuesPath}`);
   }
   lines.push("", "## Evidenze", "");
 

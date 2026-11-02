@@ -48,16 +48,19 @@ import { runTargetTest } from "../tools/targetTest";
 import type { KbDocument } from "../core/knowledge";
 import type { VcsPort } from "../core/vcs";
 import {
-  failedRunHint,
-  mergeKnownIssues,
+  mergeKnownIssueProposals,
   type KnownIssue,
+  type KnownIssueProposal,
 } from "../core/knownIssues";
 import { createModelRuntimeFromProfile, type ModelRuntime } from "./modelRuntime";
 import { runAgentTurn, type TurnFile, type TurnWrite } from "./turn";
 import {
+  ensurePokayokeIgnored,
+  loadKnownIssueProposalsFile,
   loadKnownIssuesFile,
   runArtifactPaths,
   RunSession,
+  usesPokayokeArtifacts,
   writeRunArtifacts,
   type AttemptCommit,
   type WriteTextFile,
@@ -137,9 +140,16 @@ export interface OrchestratorRequest {
   vcs?: VcsPort;
   /** Explicit run session, useful when the caller already owns the branch. */
   session?: RunSession;
-  /** Generated artifacts; defaults to `<projectDir>/report.md` and `<projectDir>/known_issues.yaml`. */
+  /**
+   * Generated artifacts; defaults to `<projectDir>/.pokayoke/report.md` and
+   * `known_issues.pending.yaml`. The approved catalogue defaults to
+   * `<projectDir>/known_issues.yaml`. Set `artifactDir` to an absolute path
+   * outside the repository to keep the generated files out of the worktree.
+   */
+  artifactDir?: string | null;
   reportPath?: string | null;
   knownIssuesPath?: string | null;
+  pendingIssuesPath?: string | null;
   branch?: string | null;
   runId?: string;
   maxAttempts?: number;
@@ -192,12 +202,20 @@ export interface OrchestratorResult {
   commits: AttemptCommit[];
   reportPath: string;
   knownIssuesPath: string;
+  pendingIssuesPath: string;
 }
 
 class WorkspaceSetupError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WorkspaceSetupError";
+  }
+}
+
+class ArtifactSetupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArtifactSetupError";
   }
 }
 
@@ -351,14 +369,28 @@ export async function runOrchestrator(
   const startedAt = now();
   const runId = request.runId ?? `run-${startedAt}`;
   const artifactPaths = runArtifactPaths(projectDir, {
+    artifactDir: request.artifactDir,
     reportPath: request.reportPath,
     knownIssuesPath: request.knownIssuesPath,
+    pendingIssuesPath: request.pendingIssuesPath,
   });
   const loadedKnownIssues = request.knownIssues
     ? { issues: request.knownIssues.map((issue) => ({ ...issue })), warning: null }
     : loadKnownIssuesFile(artifactPaths.knownIssuesPath);
-  let knownIssues: KnownIssue[] = loadedKnownIssues.issues;
+  const knownIssues: KnownIssue[] = loadedKnownIssues.issues;
   if (loadedKnownIssues.warning) log(`[orchestrator] ${loadedKnownIssues.warning}`);
+  const loadedPending = loadKnownIssueProposalsFile(artifactPaths.pendingIssuesPath);
+  let pendingProposals: KnownIssueProposal[] = loadedPending.proposals;
+  const pendingWritable = loadedPending.writable;
+  if (loadedPending.warning) log(`[orchestrator] ${loadedPending.warning}`);
+  let pendingChanged = false;
+
+  let artifactSetupReason: string | null = null;
+  if (usesPokayokeArtifacts(projectDir, artifactPaths)) {
+    const ignored = ensurePokayokeIgnored(projectDir);
+    if (!ignored.ok) artifactSetupReason = ignored.reason;
+    else if (ignored.changed) log(`[orchestrator] added .pokayoke/ to ${ignored.path}`);
+  }
   const session =
     request.session ??
     (request.vcs
@@ -477,6 +509,7 @@ export async function runOrchestrator(
   };
 
   try {
+    if (artifactSetupReason) throw new ArtifactSetupError(artifactSetupReason);
     if (session && !sessionStarted) {
       const begun = await session.begin();
       if (!begun.ok) throw new WorkspaceSetupError(begun.reason);
@@ -901,6 +934,9 @@ export async function runOrchestrator(
     if (error instanceof WorkspaceSetupError) {
       stopReason = error.message;
       code = "VCS_FAILED";
+    } else if (error instanceof ArtifactSetupError) {
+      stopReason = error.message;
+      code = "ARTIFACTS_FAILED";
     } else {
       stopReason = `orchestrator error: ${error instanceof Error ? error.message : String(error)}`;
       code = "INTERNAL_ERROR";
@@ -1002,18 +1038,38 @@ export async function runOrchestrator(
     }
   }
 
-  // A failed real compile is a useful exact-text known issue for the next run.
-  // It is only a note: it does not claim that the error was fixed.
+  // A checkout can remove an ignore file that only existed on the discarded
+  // run branch. Re-check after the restore so the generated directory cannot
+  // leak into the base worktree.
+  if (code !== "SUCCESS" && usesPokayokeArtifacts(projectDir, artifactPaths)) {
+    const ignored = ensurePokayokeIgnored(projectDir);
+    if (!ignored.ok) {
+      stopReason = ignored.reason;
+      code = "ARTIFACTS_FAILED";
+    }
+  }
+
+  // A failed real compile becomes a *proposal*, never an automatic catalogue
+  // entry. Only a human approval command can move it into known_issues.yaml.
   if (code !== "SUCCESS" && build?.verification === "REAL" && build.verdict !== "SUCCESS") {
     const diagnostics = parseCompilerDiagnostics(build.stderr, build.stdout);
     const observed = diagnostics[0]?.raw ?? build.stderr.split(/\r?\n/).find((line) => line.trim() !== "")?.trim();
-    if (observed) {
-      knownIssues = mergeKnownIssues(knownIssues, [
-        {
-          error: observed,
-          hint: failedRunHint(new Date(now()).toISOString(), stopReason || "the run stopped before success"),
-        },
+    if (observed && pendingWritable) {
+      const context = [
+        `attempt ${attempts}`,
+        `build: ${build.command ?? build.toolchain ?? "real build"}`,
+        `result: ${build.verification} ${build.verdict}`,
+        `stop: ${stopReason || code}`,
+      ].join("; ");
+      const before = pendingProposals.length;
+      pendingProposals = mergeKnownIssueProposals(pendingProposals, [
+        { error: observed, context, runId },
       ]);
+      pendingChanged = pendingChanged || pendingProposals.length !== before;
+    } else if (observed && !pendingWritable) {
+      log(
+        "[orchestrator] pending known issues file is invalid; the observed error was not proposed",
+      );
     }
   }
 
@@ -1031,6 +1087,7 @@ export async function runOrchestrator(
     restoredTo: sessionMetadata?.restoredTo ?? null,
     kept: sessionMetadata ? sessionMetadata.kept : null,
     knownIssuesPath: artifactPaths.knownIssuesPath,
+    pendingIssuesPath: artifactPaths.pendingIssuesPath,
   };
   let baseReason = runRecordReason(derived.record, level, status);
   let reason =
@@ -1047,7 +1104,7 @@ export async function runOrchestrator(
   const artifacts = await writeRunArtifacts({
     projectDir,
     report,
-    issues: knownIssues,
+    pendingProposals: pendingChanged ? pendingProposals : undefined,
     paths: artifactPaths,
     writeFile: ports.writeFile,
   });
@@ -1060,6 +1117,10 @@ export async function runOrchestrator(
     if (wasSuccess && session && sessionStarted) {
       const restored = await session.finish(false);
       if (!restored.ok) stopReason = `${stopReason}; ${restored.reason}`;
+      if (usesPokayokeArtifacts(projectDir, artifactPaths)) {
+        const ignored = ensurePokayokeIgnored(projectDir);
+        if (!ignored.ok) stopReason = `${stopReason}; ${ignored.reason}`;
+      }
     }
     const finalSession = session?.metadata();
     const finalMetadata = {
@@ -1096,5 +1157,6 @@ export async function runOrchestrator(
     commits: sessionMetadata?.commits ?? [],
     reportPath: artifacts.paths.reportPath,
     knownIssuesPath: artifacts.paths.knownIssuesPath,
+    pendingIssuesPath: artifacts.paths.pendingIssuesPath,
   };
 }

@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "mcp": "bun tools/mcp/index.ts",
+    "known-issues:approve": "bun tools/knownIssues/index.ts",
     "doctor": "bun tools/runner/index.ts doctor",
     "runner": "bun tools/runner/index.ts",
     "runner:serve": "bun tools/runner/index.ts serve"

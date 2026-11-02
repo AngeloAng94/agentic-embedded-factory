@@ -1,5 +1,14 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadProfile, type ProductProfile } from "../core/profile";
@@ -657,12 +666,12 @@ describe("Phase 6c/6d orchestrator", () => {
     expect(runResult.result.commits[1]?.commit).toBe("fake-0002");
     expect((await vcs.currentState()).branch).toBe("job/run-6d-success");
 
-    const report = readFileSync(path.join(dir, "report.md"), "utf8");
+    const report = readFileSync(path.join(dir, ".pokayoke", "report.md"), "utf8");
     expect(report).toContain("Branch: job/run-6d-success");
     expect(report).toContain("Commit tentativo 1: fake-0001");
     expect(report).toContain("Commit tentativo 2: fake-0002");
     expect(report.trimEnd().split("\n").at(-1)).toContain("PASS");
-    expect(existsSync(path.join(dir, "known_issues.yaml"))).toBe(true);
+    expect(existsSync(path.join(dir, "known_issues.yaml"))).toBe(false);
   });
 
   test("Phase 6d restores the base branch on failure and leaves the report", async () => {
@@ -672,6 +681,11 @@ describe("Phase 6c/6d orchestrator", () => {
       plan("attempted fix", "int main(void) {\n    return 0;\n}"),
     );
     try {
+      mkdirSync(path.join(projectDir, ".pokayoke"));
+      writeFileSync(path.join(projectDir, ".gitignore"), ".pokayoke/\n");
+      const catalogPath = path.join(projectDir, "known_issues.yaml");
+      const catalog = "- error: \"curated error\"\n  hint: \"keep this hint\"\n";
+      writeFileSync(catalogPath, catalog);
       const runResult = await run(
         SERIAL_PASS,
         {
@@ -696,12 +710,72 @@ describe("Phase 6c/6d orchestrator", () => {
         await vcs.currentState().then((state) => state.branch === "job/run-6d-failure"),
       ).toBe(false);
 
-      const report = readFileSync(path.join(projectDir, "report.md"), "utf8");
+      const report = readFileSync(path.join(projectDir, ".pokayoke", "report.md"), "utf8");
       expect(report).toContain("branch eliminato");
       expect(report.trimEnd().split("\n").at(-1)).toContain("NON VALUTATO");
-      const issues = readFileSync(path.join(projectDir, "known_issues.yaml"), "utf8");
-      expect(issues).toContain("missing_function");
-      expect(issues).toContain("no verified repair is recorded");
+      // The failed run only proposes; the approved catalogue is unchanged.
+      expect(readFileSync(catalogPath, "utf8")).toBe(catalog);
+      const pending = readFileSync(
+        path.join(projectDir, ".pokayoke", "known_issues.pending.yaml"),
+        "utf8",
+      );
+      expect(pending).toContain("missing_function");
+      expect(pending).toContain('run_id: "run-6d-failure"');
+      expect(pending).toContain("context:");
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a failed run leaves the worktree unchanged outside .pokayoke", async () => {
+    const vcs = new InMemoryVcs("main");
+    const projectDir = mkdtempSync(path.join(tmpdir(), "py-bench-clean-failure-"));
+    const model = new FakeModelRuntime(() =>
+      plan("attempted fix", "int main(void) {\n    return 0;\n}"),
+    );
+    const snapshot = (root: string): Record<string, string> => {
+      const files: Record<string, string> = {};
+      const walk = (dir: string) => {
+        for (const entry of readdirSync(dir)) {
+          if (entry === ".pokayoke" || entry === ".git") continue;
+          const full = path.join(dir, entry);
+          if (statSync(full).isDirectory()) walk(full);
+          else files[path.relative(root, full)] = readFileSync(full, "utf8");
+        }
+      };
+      walk(root);
+      return files;
+    };
+    try {
+      mkdirSync(path.join(projectDir, "src"));
+      writeFileSync(path.join(projectDir, ".gitignore"), ".pokayoke/\n");
+      writeFileSync(
+        path.join(projectDir, "src", "main.c"),
+        "int main(void) { return 0; }\n",
+      );
+      const before = snapshot(projectDir);
+      const runResult = await run(
+        SERIAL_PASS,
+        {
+          build: () =>
+            buildFailure("src/main.c:(.text+0x4): undefined reference to `missing_function'"),
+        },
+        session("BOOT OK\n"),
+        model,
+        undefined,
+        undefined,
+        vcs,
+        "run-clean-failure",
+        projectDir,
+      );
+
+      expect(runResult.result.ok).toBe(false);
+      expect(snapshot(projectDir)).toEqual(before);
+      expect(readFileSync(path.join(projectDir, ".gitignore"), "utf8")).toBe(
+        ".pokayoke/\n",
+      );
+      expect(existsSync(path.join(projectDir, ".pokayoke", "report.md"))).toBe(true);
+      expect(existsSync(path.join(projectDir, "known_issues.yaml"))).toBe(false);
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }

@@ -10,9 +10,9 @@ that the agent **cannot claim anything it has not measured**.
 
 > **State: Phase 6d complete** (the Phase 6c corrections, deterministic repair
 > restricted to behavior-preserving mechanical edits, one VCS branch per run,
-> one commit per attempt, restore on failure, `report.md` and
-> `known_issues.yaml`). Phases 7–9 (the `py job` CLI and demo) are not part of
-> this tree yet; see [What is not here yet](#what-is-not-here-yet).
+> one commit per attempt, restore on failure, `.pokayoke/` run artifacts,
+> human-approved known issues). Phases 7–9 (the `py job` CLI and demo) are not
+> part of this tree yet; see [What is not here yet](#what-is-not-here-yet).
 >
 > There is no board and no cross toolchain in the development environment: every
 > real tool answers `NOT_AVAILABLE` with the reason, and the hardware test is
@@ -41,7 +41,8 @@ that the agent **cannot claim anything it has not measured**.
 | Deterministic repair only applies behavior-preserving mechanical edits: a fixed standard header for an implicit standard function, or a single-edit correction to exactly one symbol (function, macro or object) declared in the project; a missing function is never turned into an empty stub | `agent/deterministicRepair.ts` |
 | Deterministic repair is also block-scoped: every fix is a `blockPatch` edit, and a layout/include change outside `[AI_START_*]` is refused and handed to the model with the reason | `agent/deterministicRepair.ts`, `core/blockPatch.ts` |
 | Every run given a `VcsPort` gets its own `job/<runId>` branch; each build attempt is committed, a successful branch is kept, and any other outcome restores the base branch and deletes the job branch | `agent/runSession.ts`, `agent/orchestrator.ts`, `tools/gitVcs.ts` |
-| `report.md` and `known_issues.yaml` are generated from the run; the report ends with the acceptance-criterion → outcome table, and a known-issue hint is input, never evidence | `agent/runSession.ts`, `agent/runReport.ts`, `core/knownIssues.ts` |
+| Run artifacts live under `.pokayoke/` (ignored, or configured outside the repo); the report ends with the acceptance-criterion → outcome table, and a known-issue hint is input, never evidence | `agent/runSession.ts`, `agent/runReport.ts`, `core/knownIssues.ts` |
+| `known_issues.yaml` is never updated by a run. A real failed compile appends a proposal with the exact error, context and run id to `known_issues.pending.yaml`; only `bun run known-issues:approve` can move a proposal into the catalogue | `agent/orchestrator.ts`, `agent/runSession.ts`, `tools/knownIssues/index.ts` |
 | The profile warns explicitly when `budget.flash_max` is lower than `tentativi_max`; the warning is returned by `loadProfile` and printed by the MCP launcher | `core/profile.ts`, `tools/mcp/index.ts` |
 | The run report ends with the acceptance-criterion → outcome table; there is no prose after it | `agent/runReport.ts`, `agent/orchestrator.ts` |
 | The generation provider is selected by the profile; the fake runtime is a marked test double that requires an explicit opt-in and never falls back to a real provider | `core/profile.ts`, `agent/modelRuntime.ts`, `agent/turn.ts` |
@@ -76,7 +77,7 @@ core/          types, verdicts, build engine + dispatch, LLM client (Ollama /
                OpenAI-compatible), path safety, doctor, artifact inspection,
                project export, static safety analysis
                vcs.ts               VcsPort + FAKE in-memory double
-               knownIssues.ts       strict known_issues.yaml parser/formatter
+               knownIssues.ts       strict catalogue/proposal parser + approval
                verificationLevels.ts  written → … → confirmed, from evidence
                runRecord.ts         validated record; level/verdict are derived
                profile.ts           product profile parser + total validation
@@ -108,15 +109,15 @@ agent/         turn.ts        one Convex-free turn: prompt → plan → validate
                               no stubs: standard include or one-edit typo only,
                               every fix still a blockPatch edit
                runSession.ts  run branch, commit per attempt, restore on failure,
-                              report.md / known_issues.yaml artifact writer
+                              .pokayoke/report.md + pending proposal writer
                orchestrator.ts  serial start → build → map → flash → observe →
-                              criteria → RunRecord/report, with budgets, VCS
-                              and the same gates as the MCP server
+                              criteria → RunRecord/report, with proposals,
+                              budgets, VCS and the same gates as the MCP server
                runReport.ts   report derived from evidence; criterion table last
                repairLoop.ts  the loop: build → compiler error → patch → rebuild;
                               emits the validated RunRecord through `recordRun`
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         340 tests: 330 pass, 10 skipped without a board / toolchain / git / Claude key
+tests/         346 tests: 336 pass, 10 skipped without a board / toolchain / git / Claude key
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -163,7 +164,7 @@ chip:
 
 ```bash
 bun install
-bun test                     # 330 pass, 10 skip (340 tests; board / toolchain / git / Claude key opt-in)
+bun test                     # 336 pass, 10 skip (346 tests; board / toolchain / git / Claude key opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -332,16 +333,47 @@ When a `VcsPort` is supplied, `agent/orchestrator.ts` creates one
 `job/<runId>` branch before the serial session and makes one commit per build
 attempt, including failed attempts. A `SUCCESS` run keeps the branch. Every
 other outcome restores the base branch and deletes the job branch, so a failed
-run leaves no source changes behind; the report and known-issue catalogue are
+run leaves no source changes behind; the report and pending proposals are
 written after the restore and are therefore still available for diagnosis.
 
+Generated artifacts are under `.pokayoke/`; the approved catalogue is a
+project input and stays at the root by default:
+
+```
+.pokayoke/
+  report.md
+  known_issues.pending.yaml  # proposals waiting for a human
+known_issues.yaml            # approved catalogue, input only
+```
+
+The orchestrator adds `.pokayoke/` to `.gitignore` when missing. The whole
+`artifactDir` (or each generated path) can be configured, including an absolute
+path outside the repository, in which case no `.gitignore` entry is needed. The
+catalogue has its own `knownIssuesPath` option and remains a normal project file.
 `report.md` is derived from the validated `RunRecord`; its last line is always
-the criterion table. `known_issues.yaml` is a strict list of exact error texts
-and hints: a hint is an input for the next repair, never evidence. A failed real
-compile adds an entry with the observed error and states that no verified repair
-is recorded; a successful run does not invent one. The hardware tools are still
-injectable; in this environment every real run stops at
-`NOT_AVAILABLE` with the reason.
+the criterion table.
+
+The approved `known_issues.yaml` is a strict list of exact error texts and
+hints: a hint is an input for the next repair, never evidence. A run never
+edits it. A failed real compile appends a proposal to
+`known_issues.pending.yaml` with the exact error, the run context and the run
+id; the catalogue remains byte-for-byte unchanged. A successful run does not
+invent one.
+
+Approval is a deliberate human command, never an agent step:
+
+```sh
+bun run known-issues:approve --all
+bun run known-issues:approve --index 1
+bun run known-issues:approve --run-id <runId>
+```
+
+Use `--hint "curated advice"` to replace the observed context. The command
+writes the approved catalogue and removes the selected proposals from the
+pending file. Defaults are `known_issues.yaml` and
+`.pokayoke/known_issues.pending.yaml`; use `--dir`, `--catalog` or `--pending`
+when they live elsewhere. The hardware tools are still injectable; in this
+environment every real run stops at `NOT_AVAILABLE` with the reason.
 
 ## Model runtime and profile selection
 
