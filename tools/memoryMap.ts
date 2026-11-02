@@ -5,14 +5,16 @@
  * address, so this tool checks the addresses in the real ELF against the chip
  * regions declared by the profile:
  *
- *   - every allocated section's VMA must be inside a region of the right type
- *     (writable → RAM, otherwise FLASH), including its end;
- *   - every section with initial data in RAM (.data) must also have its LMA
- *     inside a FLASH region;
- *   - the Cortex-M vector table (the `.vectors`/`.isr_vector` section, or the
- *     start of the lowest FLASH region) must contain an 8-byte-aligned initial
- *     stack pointer inside RAM and a reset handler inside FLASH with the Thumb
- *     bit set;
+ *   - every allocated section's VMA must be inside a region of the right type,
+ *     including its end: a section loaded from FLASH into RAM is valid whatever
+ *     its flags (for example `.ramfunc`), while a normal executable or
+ *     read-only section belongs in FLASH and a writable section in RAM;
+ *   - every section with file bytes and an LMA must also have its LMA inside a
+ *     FLASH region;
+ *   - the Cortex-M vector table (`chip.vettori`, else the `.vectors`/
+ *     `.isr_vector` section, else the start of the lowest FLASH region) must
+ *     contain an 8-byte-aligned initial stack pointer inside RAM and a reset
+ *     handler inside FLASH with the Thumb bit set;
  *   - the ELF entry point remains a secondary check: it must fall inside an
  *     executable section.
  *
@@ -256,8 +258,19 @@ export function checkMemoryMap(
 
   for (const [index, section] of allocated.entries()) {
     const label = sectionLabel(section, index);
-    const expected: MemoryRegionType = (section.flags & SHF_WRITE) !== 0 ? "ram" : "flash";
-    const placement = placeRange(section.address, section.size, expected, regions);
+    const vmaRam = placeRange(section.address, section.size, "ram", regions);
+    const vmaFlash = placeRange(section.address, section.size, "flash", regions);
+    const loadInFlash =
+      section.type !== SHT_NOBITS &&
+      section.loadAddress !== undefined &&
+      placeRange(section.loadAddress, section.size, "flash", regions).kind === "fits";
+    // A section whose LMA in FLASH differs from its VMA is copied to RAM; its
+    // flags do not decide the destination (`.ramfunc` is executable, not
+    // writable, and still runs from RAM).
+    const copiedToRam = loadInFlash && section.loadAddress !== section.address;
+    const expected: MemoryRegionType =
+      copiedToRam || (section.flags & SHF_WRITE) !== 0 ? "ram" : "flash";
+    const placement = expected === "ram" ? vmaRam : vmaFlash;
 
     checks.push({
       id: `section[${index}].vma`,
@@ -288,48 +301,47 @@ export function checkMemoryMap(
       label: `${label} VMA`,
     });
 
-    // .data has file bytes but runs from RAM; those bytes are loaded from flash.
-    if (expected === "ram" && section.type !== SHT_NOBITS && section.size > 0) {
-      if (section.loadAddress === undefined) {
-        checks.push({
-          id: `section[${index}].lma`,
-          label: `${label} load address`,
-          status: "FAIL",
-          detail: `${label} has initial data but no PT_LOAD segment maps its load address (LMA); the flash address cannot be checked`,
-        });
-      } else {
-        const loadPlacement = placeRange(section.loadAddress, section.size, "flash", regions);
-        checks.push({
-          id: `section[${index}].lma`,
-          label: `${label} load address`,
-          status: loadPlacement.kind === "fits" ? "PASS" : "FAIL",
-          detail:
-            loadPlacement.kind === "fits" && loadPlacement.region
-              ? `${label} LMA ${hex(section.loadAddress)} (${bytes(section.size)}) is in ${describeRegion(loadPlacement.region)}`
-              : placementFailure(
-                  `${label} LMA ${hex(section.loadAddress)}`,
-                  section.loadAddress,
-                  section.size,
-                  "flash",
-                  loadPlacement,
-                  regions,
-                ),
-        });
+    // File bytes loaded at a different address need a FLASH LMA. This covers
+    // `.data` and copied sections such as `.ramfunc`, whatever their flags.
+    if (section.type !== SHT_NOBITS && section.loadAddress !== undefined) {
+      const loadPlacement = placeRange(section.loadAddress, section.size, "flash", regions);
+      checks.push({
+        id: `section[${index}].lma`,
+        label: `${label} load address`,
+        status: loadPlacement.kind === "fits" ? "PASS" : "FAIL",
+        detail:
+          loadPlacement.kind === "fits" && loadPlacement.region
+            ? `${label} LMA ${hex(section.loadAddress)} (${bytes(section.size)}) is in ${describeRegion(loadPlacement.region)}`
+            : placementFailure(
+                `${label} LMA ${hex(section.loadAddress)}`,
+                section.loadAddress,
+                section.size,
+                "flash",
+                loadPlacement,
+                regions,
+              ),
+      });
 
-        if (loadPlacement.kind === "fits" && loadPlacement.region) {
-          usedByRegion.set(
-            loadPlacement.region.nome,
-            (usedByRegion.get(loadPlacement.region.nome) ?? 0) + section.size,
-          );
-        }
-        if (section.loadAddress !== section.address) {
-          claims.push({
-            start: section.loadAddress,
-            end: section.loadAddress + section.size,
-            label: `${label} LMA`,
-          });
-        }
+      if (loadPlacement.kind === "fits" && loadPlacement.region) {
+        usedByRegion.set(
+          loadPlacement.region.nome,
+          (usedByRegion.get(loadPlacement.region.nome) ?? 0) + section.size,
+        );
       }
+      if (section.loadAddress !== section.address) {
+        claims.push({
+          start: section.loadAddress,
+          end: section.loadAddress + section.size,
+          label: `${label} LMA`,
+        });
+      }
+    } else if (expected === "ram" && section.type !== SHT_NOBITS) {
+      checks.push({
+        id: `section[${index}].lma`,
+        label: `${label} load address`,
+        status: "FAIL",
+        detail: `${label} has initial data but no PT_LOAD segment maps its load address (LMA); the flash address cannot be checked`,
+      });
     }
   }
 
@@ -344,49 +356,84 @@ export function checkMemoryMap(
         : `${overlap[0].label} ${hex(overlap[0].start)}..${hex(overlap[0].end)} overlaps ${overlap[1].label} at ${hex(overlap[1].start)}`,
   });
 
-  // Vector table: named section first, then the start of the lowest FLASH region.
+  // Vector table: an explicit chip.vettori wins, then a named section, then
+  // the start of the lowest FLASH region. A bootloader application uses the
+  // explicit address because its vectors are not at the start of FLASH.
   let vectorBytes: Uint8Array | null = null;
   let vectorAddress = 0;
   let vectorSource = "";
-  const namedVector = allocated
-    .filter((section) => VECTOR_SECTION_RE.test(section.name))
-    .sort((left, right) => left.address - right.address)[0];
+  const configuredVectors = profile.chip.vettori;
 
-  if (namedVector) {
-    vectorAddress = namedVector.address;
-    vectorSource = `section "${namedVector.name}"`;
-    if (namedVector.fileBytes.length < 8) {
+  if (configuredVectors !== undefined) {
+    vectorAddress = configuredVectors;
+    vectorSource = "chip.vettori";
+    const tablePlacement = placeRange(configuredVectors, 8, "flash", regions);
+    if (tablePlacement.kind !== "fits") {
       checks.push({
         id: "vectors.table",
         label: "Cortex-M vector table",
         status: "FAIL",
-        detail: `${vectorSource} at ${hex(vectorAddress)} is ${bytes(namedVector.fileBytes.length)}, but the first two words need 8 B`,
+        detail: placementFailure(
+          `chip.vettori ${hex(configuredVectors)}`,
+          configuredVectors,
+          8,
+          "flash",
+          tablePlacement,
+          regions,
+        ),
       });
     } else {
-      vectorBytes = namedVector.fileBytes.subarray(0, 8);
-    }
-  } else {
-    const lowestFlash = [...regionsOfType(regions, "flash")].sort(
-      (left, right) => left.origine - right.origine,
-    )[0];
-    if (!lowestFlash) {
-      checks.push({
-        id: "vectors.table",
-        label: "Cortex-M vector table",
-        status: "NOT_AVAILABLE",
-        detail: "the profile declares no FLASH region",
-      });
-    } else {
-      vectorAddress = lowestFlash.origine;
-      vectorSource = `start of ${describeRegion(lowestFlash)}`;
-      vectorBytes = bytesAtAddress(image, vectorAddress, 8);
+      vectorBytes = bytesAtAddress(image, configuredVectors, 8);
       if (!vectorBytes) {
         checks.push({
           id: "vectors.table",
           label: "Cortex-M vector table",
           status: "NOT_AVAILABLE",
-          detail: `no vector section and no PT_LOAD segment covers the start of ${describeRegion(lowestFlash)} at ${hex(vectorAddress)}`,
+          detail: `chip.vettori ${hex(configuredVectors)} is in FLASH, but no section or PT_LOAD segment contains its first two words`,
         });
+      }
+    }
+  } else {
+    const namedVector = allocated
+      .filter((section) => VECTOR_SECTION_RE.test(section.name))
+      .sort((left, right) => left.address - right.address)[0];
+
+    if (namedVector) {
+      vectorAddress = namedVector.address;
+      vectorSource = `section "${namedVector.name}"`;
+      if (namedVector.fileBytes.length < 8) {
+        checks.push({
+          id: "vectors.table",
+          label: "Cortex-M vector table",
+          status: "FAIL",
+          detail: `${vectorSource} at ${hex(vectorAddress)} is ${bytes(namedVector.fileBytes.length)}, but the first two words need 8 B`,
+        });
+      } else {
+        vectorBytes = namedVector.fileBytes.subarray(0, 8);
+      }
+    } else {
+      const lowestFlash = [...regionsOfType(regions, "flash")].sort(
+        (left, right) => left.origine - right.origine,
+      )[0];
+      if (!lowestFlash) {
+        checks.push({
+          id: "vectors.table",
+          label: "Cortex-M vector table",
+          status: "NOT_AVAILABLE",
+          detail: "the profile declares no FLASH region",
+        });
+      } else {
+        vectorAddress = lowestFlash.origine;
+        vectorSource = `start of ${describeRegion(lowestFlash)}`;
+        vectorBytes = bytesAtAddress(image, vectorAddress, 8);
+        if (!vectorBytes) {
+          checks.push({
+            id: "vectors.table",
+            label: "Cortex-M vector table",
+            status: "NOT_AVAILABLE",
+            detail: `no vector section and no PT_LOAD segment covers the start of ${describeRegion(lowestFlash)} at ${hex(vectorAddress)}`,
+          });
+        }
       }
     }
   }
@@ -406,6 +453,8 @@ export function checkMemoryMap(
       detail: `${source}; word 0 = ${hex(stack)}, word 1 = ${hex(reset)}`,
     });
 
+    // A full-descending stack starts one byte past the last byte, so the
+    // inclusive end of a RAM region is valid; anything beyond it is not.
     const stackRegion = regions.find(
       (region) =>
         region.tipo === "ram" &&

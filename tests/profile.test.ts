@@ -87,6 +87,30 @@ describe("product profile", () => {
     expect(errors).toContain("chip.regioni");
   });
 
+  test("accepts an optional vector table address inside FLASH", () => {
+    const result = loadProfile(
+      BASE.replace("  famiglia: stm32", "  famiglia: stm32\n  vettori: 0x08004000"),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.profile.chip.vettori).toBe(0x08004000);
+  });
+
+  test("rejects a vector table address outside FLASH", () => {
+    expect(
+      errorsOf(
+        BASE.replace("  famiglia: stm32", "  famiglia: stm32\n  vettori: 0x20000000"),
+      ),
+    ).toContain("chip.vettori");
+  });
+
+  test("rejects a non-hex vector table address", () => {
+    expect(
+      errorsOf(
+        BASE.replace("  famiglia: stm32", "  famiglia: stm32\n  vettori: 0xZZZZZZZZ"),
+      ),
+    ).toContain("chip.vettori");
+  });
+
   test("accepts more than one RAM region", () => {
     const multi = BASE.replace(
       "    - { nome: RAM, tipo: ram, origine: 0x20000000, dimensione: 655360 }",

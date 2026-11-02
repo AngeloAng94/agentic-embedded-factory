@@ -1,10 +1,11 @@
 /**
  * Product profile (`profiles/<name>.yaml`).
  *
- * The profile is the only place where board facts live: memory sizes, build
- * system, flash tool, editable anchors and acceptance criteria. Everything the
- * agent does is bounded by it. Validation is explicit and total: a typo must
- * fail loudly here, not produce a silently wrong flash.
+ * The profile is the only place where board facts live: memory regions, an
+ * optional vector-table address, build system, flash tool, editable anchors
+ * and acceptance criteria. Everything the agent does is bounded by it.
+ * Validation is explicit and total: a typo must fail loudly here, not produce
+ * a silently wrong flash.
  */
 
 /** Two build adapters: STM32 with CMake+GCC, Zephyr with west. */
@@ -39,7 +40,12 @@ export interface ProductProfile {
   prodotto: string;
   /** Zephyr board name (e.g. a west board); required for `zephyr-west`. */
   board?: string;
-  chip: { famiglia: string; regioni: MemoryRegion[] };
+  chip: {
+    famiglia: string;
+    regioni: MemoryRegion[];
+    /** Optional vector-table address for applications behind a bootloader. */
+    vettori?: number;
+  };
   build: { sistema: BuildSystem; toolchain: string; comando: string };
   flash: { tool: FlashTool; interfaccia: FlashInterface; target?: string };
   debug: { gdb_server: string; access_port: number };
@@ -269,7 +275,12 @@ export function loadProfile(text: string): ProfileResult {
   } else {
     // Keep the old names in the allowed set so the error is the migration
     // message, not a generic "unknown field" that hides what to do.
-    checkKeys(parsed.chip, ["famiglia", "regioni", "flash_kb", "ram_kb"], "chip", errors);
+    checkKeys(
+      parsed.chip,
+      ["famiglia", "regioni", "vettori", "flash_kb", "ram_kb"],
+      "chip",
+      errors,
+    );
     for (const legacy of ["flash_kb", "ram_kb"] as const) {
       if (legacy in parsed.chip) {
         errors.push(
@@ -279,7 +290,32 @@ export function loadProfile(text: string): ProfileResult {
     }
     const famiglia = stringAt(parsed.chip.famiglia, "chip.famiglia", errors);
     const regioni = parseRegions(parsed.chip.regioni, errors);
-    if (famiglia !== null && regioni.length > 0) chip = { famiglia, regioni };
+
+    let vettori: number | undefined;
+    let vettoriValid = parsed.chip.vettori === undefined;
+    if (parsed.chip.vettori !== undefined) {
+      const parsedVettori = addressAt(parsed.chip.vettori, "chip.vettori", errors);
+      if (parsedVettori !== null) {
+        vettori = parsedVettori;
+        const flash = regioni.find(
+          (region) =>
+            region.tipo === "flash" &&
+            parsedVettori >= region.origine &&
+            parsedVettori < region.origine + region.dimensione,
+        );
+        if (flash === undefined) {
+          errors.push(
+            `chip.vettori: ${hex(parsedVettori)} is not inside a declared FLASH region`,
+          );
+        } else {
+          vettoriValid = true;
+        }
+      }
+    }
+
+    if (famiglia !== null && regioni.length > 0 && vettoriValid) {
+      chip = vettori === undefined ? { famiglia, regioni } : { famiglia, regioni, vettori };
+    }
   }
 
   let build: ProductProfile["build"] | null = null;

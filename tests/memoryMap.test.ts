@@ -26,6 +26,9 @@ const FLASH_SIZE = 64 * 1024;
 const RAM_SIZE = 16 * 1024;
 const STACK = RAM_ORIGIN + RAM_SIZE; // 0x20004000, the end of RAM
 const RESET = 0x0800_0101; // odd: Thumb bit set
+const APP_VECTOR_ADDRESS = FLASH_ORIGIN + 0x4000; // behind a bootloader
+const APP_STACK = RAM_ORIGIN + 0x3000;
+const APP_RESET = 0x0800_0201; // handler 0x08000200 is inside .text
 
 const DEFAULT_REGIONS: MemoryRegion[] = [
   { nome: "FLASH", tipo: "flash", origine: FLASH_ORIGIN, dimensione: FLASH_SIZE },
@@ -43,10 +46,14 @@ const BASE_YAML = [
   "tentativi_max: 3",
 ].join("\n");
 
-function profileWith(regions: readonly MemoryRegion[] = DEFAULT_REGIONS): ProductProfile {
+function profileWith(
+  regions: readonly MemoryRegion[] = DEFAULT_REGIONS,
+  vettori?: number,
+): ProductProfile {
   const chip = [
     "chip:",
     "  famiglia: stm32",
+    ...(vettori === undefined ? [] : [`  vettori: 0x${vettori.toString(16)}`]),
     "  regioni:",
     ...regions.map(
       (region) =>
@@ -95,6 +102,14 @@ const SECTIONS: FixtureSection[] = [
 // FLASH = 256 + 4096 + 1024 + 512 = 5888 B; RAM = 512 + 1024 = 1536 B.
 const EXPECTED_FLASH = 5888;
 const EXPECTED_RAM = 1536;
+
+const RAMFUNC: FixtureSection = {
+  name: ".ramfunc",
+  flags: SHF_ALLOC | SHF_EXECINSTR,
+  address: 0x2000_2000,
+  bytes: new Array<number>(64).fill(0x90),
+  loadAddress: 0x0800_1800,
+};
 
 const dir = mkdtempSync(path.join(tmpdir(), "py-bench-memory-test-"));
 afterAll(() => {
@@ -188,6 +203,26 @@ describe("memory_map_check", () => {
     expect(report.regions).toHaveLength(3);
     expect(report.vectorTable?.stack).toBe(STACK);
     for (const check of report.checks) expect(check.status).toBe("PASS");
+  });
+
+  test("an initial stack pointer at the exact end of RAM is valid", () => {
+    const report = reportFor(withVectors(SECTIONS, STACK, RESET));
+
+    expect(report.verdict).toBe("SUCCESS");
+    const stack = checkNamed(report, "vectors.stack");
+    expect(stack?.status).toBe("PASS");
+    expect(stack?.detail).toContain("initial SP 0x20004000");
+    expect(stack?.detail).toContain("is in RAM region");
+  });
+
+  test("an initial stack pointer 8 bytes past RAM is rejected", () => {
+    const report = reportFor(withVectors(SECTIONS, STACK + 8, RESET));
+
+    expect(report.verdict).toBe("FAILURE");
+    const stack = checkNamed(report, "vectors.stack");
+    expect(stack?.status).toBe("FAIL");
+    expect(stack?.detail).toContain("initial SP 0x20004008");
+    expect(stack?.detail).toContain("outside every RAM region");
   });
 
   test("a wrong RAM origin with the correct size is rejected", () => {
@@ -313,6 +348,31 @@ describe("memory_map_check", () => {
     expect(text?.detail).toContain("FLASH region was expected");
   });
 
+  test("an executable, non-writable .ramfunc copied to RAM is valid", () => {
+    const report = reportFor([...SECTIONS, RAMFUNC]);
+
+    expect(report.verdict).toBe("SUCCESS");
+    expect(sectionCheck(report, ".ramfunc")?.status).toBe("PASS");
+    expect(sectionCheck(report, ".ramfunc", "lma")?.status).toBe("PASS");
+    expect(report.regions.find((region) => region.name === "FLASH")?.used).toBe(
+      EXPECTED_FLASH + RAMFUNC.bytes!.length,
+    );
+    expect(report.regions.find((region) => region.name === "RAM")?.used).toBe(
+      EXPECTED_RAM + RAMFUNC.bytes!.length,
+    );
+  });
+
+  test("a .ramfunc whose VMA is outside every RAM region is rejected", () => {
+    const bad: FixtureSection = { ...RAMFUNC, address: 0x2000_5000 };
+    const report = reportFor([...SECTIONS, bad]);
+
+    expect(report.verdict).toBe("FAILURE");
+    const vma = sectionCheck(report, ".ramfunc");
+    expect(vma?.status).toBe("FAIL");
+    expect(vma?.detail).toContain("VMA 0x20005000");
+    expect(vma?.detail).toContain("outside every RAM region");
+  });
+
   test("a section that crosses the end of RAM is rejected", () => {
     const sections = SECTIONS.map((section) =>
       section.name === ".data"
@@ -353,6 +413,27 @@ describe("memory_map_check", () => {
     const overlap = checkNamed(report, "sections.overlap");
     expect(overlap?.status).toBe("FAIL");
     expect(overlap?.detail).toContain("overlaps");
+  });
+
+  test("chip.vettori reads the table at a bootloader offset, overriding the named section", () => {
+    const sections: FixtureSection[] = [
+      ...withVectors(SECTIONS, 0x2000_6000, 0x0800_0100), // invalid table at 0x08000000
+      {
+        name: ".app_vectors",
+        flags: SHF_ALLOC,
+        address: APP_VECTOR_ADDRESS,
+        bytes: vectorBytes(APP_STACK, APP_RESET),
+      },
+    ];
+    const report = reportFor(sections, profileWith(DEFAULT_REGIONS, APP_VECTOR_ADDRESS));
+
+    expect(report.verdict).toBe("SUCCESS");
+    expect(report.vectorTable?.address).toBe(APP_VECTOR_ADDRESS);
+    expect(report.vectorTable?.stack).toBe(APP_STACK);
+    expect(report.vectorTable?.reset).toBe(APP_RESET);
+    expect(report.vectorTable?.source).toContain("chip.vettori");
+    expect(checkNamed(report, "vectors.stack")?.status).toBe("PASS");
+    expect(checkNamed(report, "vectors.reset")?.status).toBe("PASS");
   });
 
   test("the vector table can be read from the start of FLASH without a named section", () => {

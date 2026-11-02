@@ -34,8 +34,9 @@ that the agent **cannot claim anything it has not measured**.
 | A flash mismatch is a doctor FAIL and makes every later read unreliable (`read_state` refuses) | `tools/doctor.ts`, `tools/probe.ts`, `tools/readState.ts` |
 | A busy probe or a blocked/unreachable core is a FAIL; unknown is `NOT_AVAILABLE` with the reason | `tools/doctor.ts` |
 | Serial capture must start before flash/reset; a late capture is marked incomplete | `tools/serialCapture.ts` |
-| Every allocated section's VMA is inside a declared region of the right type, and `.data`'s LMA is inside FLASH | `tools/memoryMap.ts`, `core/elfImage.ts` |
-| The Cortex-M vector table has an 8-byte-aligned initial SP in RAM and a Thumb reset handler in FLASH | `tools/memoryMap.ts` |
+| Every allocated section's VMA is inside a declared region of the right type, and every section with file bytes and an LMA has its LMA inside FLASH; a section copied to RAM is valid whatever its flags | `tools/memoryMap.ts`, `core/elfImage.ts` |
+| The Cortex-M vector table has an 8-byte-aligned initial SP in RAM (the inclusive region end is valid) and a Thumb reset handler in FLASH | `tools/memoryMap.ts` |
+| `chip.vettori`, when present, is a hex address inside a declared FLASH region | `core/profile.ts`, `tools/memoryMap.ts` |
 | `chip.regioni` is the only memory declaration; `flash_kb`/`ram_kb` are rejected with a migration error | `core/profile.ts` |
 | A profile cannot choose a flash tool without its target or a Zephyr build without a board | `core/profile.ts` |
 | The model proposes; only validated patches reach the files, all-or-nothing | `agent/turn.ts` |
@@ -80,7 +81,7 @@ tools/         exec.ts        argv execution (no shell) + PATH resolver
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
                repairLoop.ts  the loop: build → compiler error → patch → rebuild
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         253 tests, 9 skipped without a board / toolchain / git opt-in
+tests/         261 tests, 9 skipped without a board / toolchain / git opt-in
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -102,11 +103,18 @@ under `core/`, `tools/` and `agent/` imports only Bun and Node built-ins.
 `tipo` (`flash` or `ram`), an `origine` hex address and a `dimensione` in bytes;
 more than one region of type `ram` is allowed. The old `flash_kb`/`ram_kb` pair
 is rejected with an explicit error that asks for the regions, never accepted as
-a fallback:
+a fallback.
+
+`chip.vettori` is optional. It is the hex address of the Cortex-M vector table
+for an application loaded behind a bootloader; when present, `memory_map_check`
+reads the table there instead of at a named vector section or at the start of
+FLASH. The address must lie in a declared FLASH region:
 
 ```yaml
 chip:
   famiglia: stm32
+  # optional: application vectors after a bootloader
+  vettori: 0x08004000
   regioni:
     - { nome: FLASH, tipo: flash, origine: 0x08000000, dimensione: 2097152 }
     - { nome: RAM,   tipo: ram,   origine: 0x20000000, dimensione: 655360 }
@@ -116,7 +124,7 @@ chip:
 
 ```bash
 bun install
-bun test                     # 244 pass, 9 skip (board / toolchain / git opt-in)
+bun test                     # 252 pass, 9 skip (board / toolchain / git opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
@@ -176,11 +184,16 @@ The serial session must be started **before** flash or reset. `stop()` reports
 the capture started, because the boot banner may contain the acceptance criteria.
 
 `memory_map_check` checks addresses, not just sizes: every allocated section's
-VMA must end inside a region of the expected type, every `.data` LMA must end
-inside FLASH, and the Cortex-M vector words are read from the `.isr_vector`
-(`.vectors`) section or from the start of the lowest FLASH region. The initial
-SP must be in RAM and 8-byte aligned; the reset handler must be in FLASH with
-bit 0 set. The ELF entry point is a secondary executable-section check.
+VMA must end inside a region of the expected type, and every section with file
+bytes and an LMA must load from FLASH. A section with its LMA in FLASH and its
+VMA in RAM is copied to RAM and is valid whatever its flags; this covers
+`.ramfunc` (executable, not writable) as well as `.data`. The Cortex-M vector
+words are read from `chip.vettori` when configured, otherwise from the
+`.isr_vector` (`.vectors`) section or from the start of the lowest FLASH region.
+The initial SP must be in RAM and 8-byte aligned; the inclusive end of a RAM
+region is a valid stack top, one byte past it is not. The reset handler must be
+in FLASH with bit 0 set. The ELF entry point is a secondary executable-section
+check.
 
 ## Legacy snapshot and the `embedfactory-v1` tag
 
