@@ -77,7 +77,25 @@ describe("block patch — inside the markers", () => {
     if (!result.ok) expect(result.code).toBe("BLOCK_NESTED");
   });
 
-  test("rejects an empty body", () => {
+  test("writes into an existing empty block (markers back to back)", () => {
+    const empty = "// [AI_START_APP]\n// [AI_END_APP]\n";
+    const result = applyBlockEdit(empty, "APP", "int main(void) { return 0; }");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.content).toBe("// [AI_START_APP]\nint main(void) { return 0; }\n// [AI_END_APP]\n");
+    }
+  });
+
+  test("rejects an empty new body even when the block is empty", () => {
+    const empty = "// [AI_START_APP]\n// [AI_END_APP]\n";
+    const result = applyBlockEdit(empty, "APP", "  \n \n");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("EMPTY_BLOCK");
+  });
+
+  test("rejects an empty body for a non-empty block too", () => {
     const result = applyBlockEdit(FILE, "APP", "  \n ");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("EMPTY_BLOCK");

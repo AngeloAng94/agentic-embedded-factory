@@ -2,25 +2,37 @@
  * Product profile (`profiles/<name>.yaml`).
  *
  * The profile is the only place where board facts live: memory sizes, build
- * command, flash tool, editable anchors and acceptance criteria. Everything the
+ * system, flash tool, editable anchors and acceptance criteria. Everything the
  * agent does is bounded by it. Validation is explicit and total: a typo must
  * fail loudly here, not produce a silently wrong flash.
  */
 
-export type BuildSystem = "cmake" | "make" | "west";
+/** Two build adapters: STM32 with CMake+GCC, Zephyr with west. */
+export type BuildSystem = "cmake" | "zephyr-west";
 export type FlashInterface = "swd" | "jtag";
+export type FlashTool = "STM32_Programmer_CLI" | "openocd" | "probe-rs" | "west";
 
 export type Criterion =
   | { seriale_contiene: string }
   | { log_non_contiene: string[] }
   | { test_su_target: "pass" };
 
+export interface SerialConfig {
+  porta: string;
+  baud: number;
+  /** Optional capture command; `{porta}` and `{baud}` are substituted. */
+  comando?: string;
+}
+
 export interface ProductProfile {
   prodotto: string;
+  /** Zephyr board name (e.g. a west board); required for `zephyr-west`. */
+  board?: string;
   chip: { famiglia: string; flash_kb: number; ram_kb: number };
   build: { sistema: BuildSystem; toolchain: string; comando: string };
-  flash: { tool: string; interfaccia: FlashInterface };
+  flash: { tool: FlashTool; interfaccia: FlashInterface; target?: string };
   debug: { gdb_server: string; access_port: number };
+  seriale?: SerialConfig;
   /** Editable block names: `// [AI_START_<name>]` … `// [AI_END_<name>]`. */
   ancore: string[];
   criteri: Criterion[];
@@ -33,16 +45,19 @@ export type ProfileResult =
 
 const TOP_KEYS = new Set([
   "prodotto",
+  "board",
   "chip",
   "build",
   "flash",
   "debug",
+  "seriale",
   "ancore",
   "criteri",
   "tentativi_max",
 ]);
-const BUILD_SYSTEMS: BuildSystem[] = ["cmake", "make", "west"];
+const BUILD_SYSTEMS: BuildSystem[] = ["cmake", "zephyr-west"];
 const FLASH_INTERFACES: FlashInterface[] = ["swd", "jtag"];
+const FLASH_TOOLS: FlashTool[] = ["STM32_Programmer_CLI", "openocd", "probe-rs", "west"];
 const ANCHOR_RE = /^[A-Z][A-Z0-9_]*$/;
 const MAX_ATTEMPTS = 10;
 
@@ -70,12 +85,7 @@ function integerAt(value: unknown, path: string, errors: string[], min: number, 
   return value;
 }
 
-function checkKeys(
-  value: Record<string, unknown>,
-  allowed: string[],
-  path: string,
-  errors: string[],
-): void {
+function checkKeys(value: Record<string, unknown>, allowed: string[], path: string, errors: string[]): void {
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key)) errors.push(`${path}.${key}: unknown field`);
   }
@@ -129,9 +139,9 @@ export function loadProfile(text: string): ProfileResult {
   const errors: string[] = [];
   let parsed: unknown;
   try {
-    // Bun ships a YAML parser; cast keeps this working with older type defs.
+    // Bun ships a YAML parser (Bun >= 1.2.21); cast keeps this working with older type defs.
     const yaml = (Bun as unknown as { YAML?: { parse(source: string): unknown } }).YAML;
-    if (!yaml) return { ok: false, errors: ["YAML support is not available in this Bun runtime"] };
+    if (!yaml) return { ok: false, errors: ["YAML support requires Bun >= 1.2.21"] };
     parsed = yaml.parse(text);
   } catch (error) {
     return { ok: false, errors: [`YAML: ${error instanceof Error ? error.message : String(error)}`] };
@@ -141,6 +151,8 @@ export function loadProfile(text: string): ProfileResult {
   checkKeys(parsed, [...TOP_KEYS], "profile", errors);
 
   const prodotto = stringAt(parsed.prodotto, "prodotto", errors);
+  const board =
+    parsed.board === undefined ? undefined : (stringAt(parsed.board, "board", errors) ?? undefined);
 
   let chip: ProductProfile["chip"] | null = null;
   if (!isObject(parsed.chip)) {
@@ -166,23 +178,41 @@ export function loadProfile(text: string): ProfileResult {
     }
     const toolchain = stringAt(parsed.build.toolchain, "build.toolchain", errors);
     const comando = stringAt(parsed.build.comando, "build.comando", errors);
-    if (build === null && BUILD_SYSTEMS.includes(sistema as BuildSystem) && toolchain && comando) {
+    if (BUILD_SYSTEMS.includes(sistema as BuildSystem) && toolchain && comando) {
       build = { sistema: sistema as BuildSystem, toolchain, comando };
     }
+  }
+
+  if (build?.sistema === "zephyr-west" && !board) {
+    errors.push("board: required when build.sistema is zephyr-west");
   }
 
   let flash: ProductProfile["flash"] | null = null;
   if (!isObject(parsed.flash)) {
     errors.push("flash: must be an object");
   } else {
-    checkKeys(parsed.flash, ["tool", "interfaccia"], "flash", errors);
+    checkKeys(parsed.flash, ["tool", "interfaccia", "target"], "flash", errors);
     const tool = stringAt(parsed.flash.tool, "flash.tool", errors);
     const interfaccia = parsed.flash.interfaccia;
     if (typeof interfaccia !== "string" || !FLASH_INTERFACES.includes(interfaccia as FlashInterface)) {
       errors.push(`flash.interfaccia: must be one of ${FLASH_INTERFACES.join(", ")}`);
     }
-    if (tool && FLASH_INTERFACES.includes(interfaccia as FlashInterface)) {
-      flash = { tool, interfaccia: interfaccia as FlashInterface };
+    if (tool !== null && !FLASH_TOOLS.includes(tool as FlashTool)) {
+      errors.push(`flash.tool: must be one of ${FLASH_TOOLS.join(", ")}`);
+    }
+    const target =
+      parsed.flash.target === undefined
+        ? undefined
+        : (stringAt(parsed.flash.target, "flash.target", errors) ?? undefined);
+    if ((tool === "openocd" || tool === "probe-rs") && !target) {
+      errors.push(`flash.target: required when flash.tool is ${tool}`);
+    }
+    if (
+      tool !== null &&
+      FLASH_TOOLS.includes(tool as FlashTool) &&
+      FLASH_INTERFACES.includes(interfaccia as FlashInterface)
+    ) {
+      flash = { tool: tool as FlashTool, interfaccia: interfaccia as FlashInterface, target };
     }
   }
 
@@ -194,6 +224,22 @@ export function loadProfile(text: string): ProfileResult {
     const server = stringAt(parsed.debug.gdb_server, "debug.gdb_server", errors);
     const port = integerAt(parsed.debug.access_port, "debug.access_port", errors, 0, 65535);
     if (server !== null && port !== null) debug = { gdb_server: server, access_port: port };
+  }
+
+  let seriale: SerialConfig | undefined;
+  if (parsed.seriale !== undefined) {
+    if (!isObject(parsed.seriale)) {
+      errors.push("seriale: must be an object");
+    } else {
+      checkKeys(parsed.seriale, ["porta", "baud", "comando"], "seriale", errors);
+      const porta = stringAt(parsed.seriale.porta, "seriale.porta", errors);
+      const baud = integerAt(parsed.seriale.baud, "seriale.baud", errors, 300, 4_000_000);
+      const comando =
+        parsed.seriale.comando === undefined
+          ? undefined
+          : (stringAt(parsed.seriale.comando, "seriale.comando", errors) ?? undefined);
+      if (porta !== null && baud !== null) seriale = { porta, baud, comando };
+    }
   }
 
   const ancore: string[] = [];
@@ -232,10 +278,12 @@ export function loadProfile(text: string): ProfileResult {
     ok: true,
     profile: {
       prodotto: prodotto!,
+      board,
       chip: chip!,
       build: build!,
       flash: flash!,
       debug: debug!,
+      seriale,
       ancore,
       criteri,
       tentativi_max: tentativi!,
@@ -246,4 +294,23 @@ export function loadProfile(text: string): ProfileResult {
 /** Block names the agent may edit, in profile order. */
 export function editableAnchors(profile: ProductProfile): string[] {
   return [...profile.ancore];
+}
+
+/** Stable ids for the acceptance criteria, used by evidence. */
+export function profileCriteria(profile: ProductProfile): { id: string; description: string }[] {
+  return profile.criteri.map((criterion, index) => {
+    if ("seriale_contiene" in criterion) {
+      return {
+        id: `seriale_contiene[${index}]`,
+        description: `serial output contains "${criterion.seriale_contiene}"`,
+      };
+    }
+    if ("log_non_contiene" in criterion) {
+      return {
+        id: `log_non_contiene[${index}]`,
+        description: `log does not contain ${criterion.log_non_contiene.join(", ")}`,
+      };
+    }
+    return { id: `test_su_target[${index}]`, description: "on-target test passes" };
+  });
 }

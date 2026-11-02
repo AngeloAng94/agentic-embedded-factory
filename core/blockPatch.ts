@@ -59,11 +59,14 @@ export function applyBlockEdit(current: string, block: string, content: string):
   if (block.trim() === "") {
     return { ok: false, code: "BLOCK_NOT_DECLARED", reason: "empty block name" };
   }
+  // An existing empty block (START and END back to back, as after scaffolding)
+  // is perfectly writable: only an empty *new* body is refused, because that
+  // would silently delete code.
   if (content.trim() === "") {
     return {
       ok: false,
       code: "EMPTY_BLOCK",
-      reason: "the block would be emptied: send the code you want, not an empty string",
+      reason: "the new block body is empty: send the code you want, not an empty string",
     };
   }
   if (ANY_MARKER.test(content)) {

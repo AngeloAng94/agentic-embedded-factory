@@ -8,11 +8,16 @@ repository as it found it.
 The product is not the generated code — models already write code. The product is
 that the agent **cannot claim anything it has not measured**.
 
-> **State: Phase 2 complete** (VCS boundary, run record, verification levels,
-> validated product profile, block-scoped patching). The orchestrator, the CLI,
-> the MCP server and the hardware tools do not exist yet; see
-> [What is not here yet](#what-is-not-here-yet). Nothing in this README describes
-> them as working.
+> **State: Phase 3 complete** (native tools: profile doctor, build, flash,
+> `read_state`, GDB batch, serial capture, on-target test; CMake and Zephyr
+> `west` build adapters). The orchestrator, the CLI, the MCP server and the demo
+> do not exist yet; see [What is not here yet](#what-is-not-here-yet). Nothing in
+> this README describes them as working.
+>
+> There is no board and no cross toolchain in the development environment: every
+> real tool answers `NOT_AVAILABLE` with the reason, and the hardware test is
+> skipped. That path is tested; the real one is not. Run it with a board using
+> the command below.
 
 ## Non-negotiable rules
 
@@ -22,6 +27,9 @@ that the agent **cannot claim anything it has not measured**.
 | Every result carries `verification` (`REAL`/`SIMULATED`/`NOT_AVAILABLE`) and `verdict` (`SUCCESS`/`FAILURE`/`UNKNOWN`) | `core/types.ts` |
 | A project is `verified` only after a real successful build | `core/buildStatus.ts → projectStatusFor` |
 | No build runner → `NOT_AVAILABLE`, never a simulated success | `core/buildDispatch.ts` |
+| No binary, no debugger, no serial helper → `NOT_AVAILABLE` with the reason | `tools/doctor.ts`, `tools/build.ts`, `tools/flash.ts`, `tools/debug.ts`, `tools/serialCapture.ts` |
+| `read_state` needs two identical reads; a mismatch is a failure | `tools/readState.ts` |
+| A profile cannot choose a flash tool without its target or a Zephyr build without a board | `core/profile.ts` |
 | The model proposes; only validated patches reach the files, all-or-nothing | `agent/turn.ts` |
 | Repair stops at 3 attempts, then the run fails and says so | `agent/repairLoop.ts` |
 | The LLM answer never decides a verdict | `agent/repairLoop.ts` (verdicts come from the build result only) |
@@ -30,8 +38,9 @@ that the agent **cannot claim anything it has not measured**.
 | Existing files change only inside `// [AI_START_<block>]`, for blocks declared in the profile; one bad edit writes nothing | `core/blockPatch.ts`, `agent/turn.ts` |
 | Every job works on its own branch and a failure discards it | `core/vcs.ts`, `tools/gitVcs.ts` |
 
-Not yet implemented, and deliberately absent from the code: flashing, on-target
-observation, memory-map checking, `ModelRuntime`, the CLI and MCP.
+Not yet implemented, and deliberately absent from the code: on-target observation
+wired into the loop, memory-map checking, `ModelRuntime`, the CLI, MCP and the
+demo. The hardware tools exist but have never run on a board in this environment.
 
 ## Layout
 
@@ -44,14 +53,23 @@ core/          types, verdicts, build engine + dispatch, LLM client (Ollama /
                runRecord.ts         validated record; level/verdict are derived
                profile.ts           product profile parser + total validation
                blockPatch.ts        edits inside [AI_START_*] markers only
-tools/         gitVcs.ts      real git implementation of VcsPort
+               toolResult.ts        REAL / SIMULATED / NOT_AVAILABLE outcomes
+tools/         exec.ts        argv execution (no shell) + PATH resolver
+               doctor.ts      profile-driven checks: PASS/MISSING, READY if all required
+               build.ts       cmake (STM32) | zephyr-west (Zephyr) from the profile
+               flash.ts       STM32_Programmer_CLI | openocd | probe-rs | west
+               readState.ts   double read over GDB; mismatch = failure
+               debug.ts       GDB batch with explicit commands
+               serialCapture.ts  capture command from the profile
+               targetTest.ts  on-target test port; NOT_AVAILABLE until wired
+               gitVcs.ts      real git implementation of VcsPort
                runner/        local HTTP runner (build / doctor / export / turn)
-                              and Zephyr verification. Transitional: Phase 3/5
-                              replace it with MCP tools invoked in-process.
+                              and Zephyr verification. Transitional: Phase 5
+                              replaces it with MCP tools invoked in-process.
 agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
                repairLoop.ts  the loop: build → compiler error → patch → rebuild
 profiles/      demo-board.yaml  fictional example (DEMO-BOARD-01, no real names)
-tests/         151 tests, 3 skipped without a toolchain / without git opt-in
+tests/         193 tests, 7 skipped without a board / toolchain / git opt-in
 samples/       reference Zephyr project used by the verification tests
 legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
@@ -60,16 +78,30 @@ legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, te
 backend, web workspace, desktop app) with a SHA-256 manifest. It is kept intact on
 purpose: see [legacy/README.md](legacy/README.md).
 
+## Requirements
+
+Bun **>= 1.2.21**, the first release with `Bun.YAML`, used to parse profiles. The
+minimum is pinned in `package.json` under `engines`. Everything else is a dev
+dependency except the platform's `@vly-ai/integrations` scaffold: the bench code
+under `core/`, `tools/` and `agent/` imports only Bun and Node built-ins.
+
 ## Commands
 
 ```bash
 bun install
-bun test                     # 103 pass, 1 skip (needs a real Zephyr toolchain)
+bun test                     # 193 pass, 7 skip (board / toolchain / git opt-in)
 bunx tsc -b --noEmit         # typecheck
 bun run lint                 # eslint
 
 bun run doctor               # real toolchain probe; reports MISSING, never invents
 bun run runner:serve         # local build runner on 127.0.0.1:8790 (see tools/runner/README.md)
+
+# the real-board test, skipped without the opt-in and the four paths
+PY_BENCH_ALLOW_REAL_HW=1 \
+PY_BENCH_HW_PROFILE=profiles/demo-board.yaml \
+PY_BENCH_HW_PROJECT=/path/to/firmware \
+PY_BENCH_HW_ARTIFACT=/path/to/firmware/build/app.elf \
+bun test tests/hw.real.test.ts
 
 # real git integration tests, skipped by default (the dev sandbox forbids git)
 PY_BENCH_ALLOW_REAL_GIT=1 bun test tests/git.real.test.ts
@@ -104,10 +136,11 @@ where git works. This is a known gap, not a completed step.
 
 ## What is not here yet
 
-Phases 3–9 of the plan: STM32 tooling (flash, double `read_state`, GDB batch,
-serial capture, `target_test`), memory map check, MCP server, `ModelRuntime`
+Phases 4–9 of the plan: memory map check, MCP server, `ModelRuntime`
 orchestrator (Claude Agent SDK + the existing `core/llmClient.ts`), `py job` CLI,
-demo.
+demo. The Phase 3 tools are not wired into the repair loop yet: the loop still
+emits no `RunRecord` (that is Phase 6), and none of the hardware tools has run
+against a real board here.
 
 The web workspace and the landing page were removed from the active tree on
 purpose: this is a bench/CI tool now, not a web app. There is no dev server.

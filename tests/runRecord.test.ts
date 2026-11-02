@@ -2,26 +2,27 @@ import { describe, expect, test } from "bun:test";
 import { finalizeRunRecord, validateRunRecord } from "../core/runRecord";
 import type { Evidence } from "../core/verificationLevels";
 
-const EVIDENCE: Evidence[] = [
-  {
-    level: "written",
+const CRITERIA = [
+  { id: "seriale", description: "serial contains BOOT OK" },
+  { id: "log", description: "log does not contain HardFault" },
+];
+
+function ev(level: Evidence["level"], overrides: Partial<Evidence> = {}): Evidence {
+  return {
+    level,
     verification: "REAL",
     verdict: "SUCCESS",
     at: 1_700_000_000_000,
-    tool: "filesystem",
-    detail: "2 files",
-    source: "tool",
-  },
-  {
-    level: "compiled",
-    verification: "REAL",
-    verdict: "SUCCESS",
-    at: 1_700_000_001_000,
+    actor: "tool",
+    actorId: "arm-none-eabi-gcc",
     tool: "arm-none-eabi-gcc",
-    detail: "exit 0",
-    source: "tool",
-  },
-];
+    detail: null,
+    criterion: level === "observed" ? "seriale" : null,
+    ...overrides,
+  };
+}
+
+const EVIDENCE: Evidence[] = [ev("written"), ev("compiled")];
 
 const record = {
   id: "run-1",
@@ -29,6 +30,7 @@ const record = {
   profile: "DEMO-BOARD-01",
   request: "blink the LED",
   branch: "job/run-1",
+  criteria: CRITERIA,
   evidence: EVIDENCE,
   changes: [{ path: "src/main.c", kind: "block-edit", block: "APP" }],
   modelText: "DONE — verified on target",
@@ -40,7 +42,31 @@ describe("run record", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.level).toBe("compiled");
-      // Model claims success; only a compile was measured.
+      expect(result.status).toBe("UNKNOWN");
+    }
+  });
+
+  test("observed needs every profile criterion, and the record carries them", () => {
+    const complete = [
+      ...EVIDENCE,
+      ev("flashed"),
+      ev("observed", { criterion: "seriale" }),
+      ev("observed", { criterion: "log" }),
+    ];
+    const result = validateRunRecord({ ...record, evidence: complete });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.level).toBe("observed");
+      expect(result.status).toBe("SUCCESS");
+    }
+  });
+
+  test("a missing criterion keeps the run at flashed", () => {
+    const partial = [...EVIDENCE, ev("flashed"), ev("observed", { criterion: "seriale" })];
+    const result = validateRunRecord({ ...record, evidence: partial });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.level).toBe("flashed");
       expect(result.status).toBe("UNKNOWN");
     }
   });
@@ -61,6 +87,45 @@ describe("run record", () => {
     const result = validateRunRecord({ ...record, verified: true });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.join(" ")).toContain("verified: unknown field");
+  });
+
+  test("evidence without actor identity is invalid", () => {
+    const broken = EVIDENCE.map((evidence) => {
+      const copy: Record<string, unknown> = { ...evidence };
+      delete copy.actor;
+      delete copy.actorId;
+      return copy;
+    });
+    const result = validateRunRecord({ ...record, evidence: broken });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toContain("evidence[0].actor");
+      expect(result.errors.join(" ")).toContain("evidence[0].actorId");
+    }
+  });
+
+  test("confirmed evidence must come from a human", () => {
+    const forged = [...EVIDENCE, ev("confirmed", { actor: "agent", actorId: "claude" })];
+    const result = validateRunRecord({ ...record, evidence: forged });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toContain("must come from a human");
+  });
+
+  test("observed evidence must name the criterion it evaluates", () => {
+    const result = validateRunRecord({
+      ...record,
+      evidence: [...EVIDENCE, ev("observed", { criterion: null })],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toContain("required on observed evidence");
+  });
+
+  test("criteria are required and their ids unique", () => {
+    const missing = validateRunRecord({ ...record, criteria: [] });
+    expect(missing.ok).toBe(false);
+    const duplicated = validateRunRecord({ ...record, criteria: [CRITERIA[0], CRITERIA[0]] });
+    expect(duplicated.ok).toBe(false);
+    if (!duplicated.ok) expect(duplicated.errors.join(" ")).toContain("duplicate");
   });
 
   test("a block edit without a block name is invalid", () => {
@@ -92,12 +157,13 @@ describe("run record", () => {
       profile: "DEMO-BOARD-01",
       request: "x",
       branch: null,
+      criteria: CRITERIA,
       changes: [],
       evidence: [
-        EVIDENCE[0]!,
-        EVIDENCE[1]!,
-        { ...EVIDENCE[1]!, level: "flashed" },
-        { ...EVIDENCE[1]!, level: "observed" },
+        ...EVIDENCE,
+        ev("flashed"),
+        ev("observed", { criterion: "seriale" }),
+        ev("observed", { criterion: "log" }),
       ],
     });
 

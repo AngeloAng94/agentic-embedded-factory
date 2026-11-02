@@ -8,21 +8,22 @@ import {
   type VerificationLevel,
 } from "../core/verificationLevels";
 
-function evidence(
-  level: VerificationLevel,
-  overrides: Partial<Evidence> = {},
-): Evidence {
+function evidence(level: VerificationLevel, overrides: Partial<Evidence> = {}): Evidence {
   return {
     level,
     verification: "REAL",
     verdict: "SUCCESS",
     at: 1_700_000_000_000,
-    tool: "tool",
+    actor: "tool",
+    actorId: "arm-none-eabi-gcc",
+    tool: "arm-none-eabi-gcc",
     detail: null,
-    source: "tool",
+    criterion: level === "observed" ? "seriale" : null,
     ...overrides,
   };
 }
+
+const base = () => [evidence("written"), evidence("compiled"), evidence("flashed")];
 
 describe("verification levels", () => {
   test("nothing in the record means nothing was proven", () => {
@@ -36,43 +37,80 @@ describe("verification levels", () => {
     expect(deriveLevel([evidence("written"), evidence("compiled")])).toBe("compiled");
   });
 
-  test("the full chain reaches confirmed only with a human sign-off", () => {
-    const chain = (["written", "compiled", "flashed", "observed"] as VerificationLevel[]).map((level) =>
-      evidence(level),
-    );
-
-    expect(deriveLevel(chain)).toBe("observed");
-    expect(deriveLevel([...chain, evidence("confirmed")])).toBe("observed");
-    expect(deriveLevel([...chain, evidence("confirmed", { source: "human", tool: "human" })])).toBe(
-      "confirmed",
-    );
+  test("observed is reached when every profile criterion is REAL and passing", () => {
+    const evidenceList = [
+      ...base(),
+      evidence("observed", { criterion: "seriale" }),
+      evidence("observed", { criterion: "log" }),
+      evidence("observed", { criterion: "target" }),
+    ];
+    expect(deriveLevel(evidenceList, ["seriale", "log", "target"])).toBe("observed");
   });
 
-  test("SIMULATED or FAILURE evidence never advances a level", () => {
-    const base = [evidence("written"), evidence("compiled")];
-    expect(deriveLevel([...base, evidence("flashed", { verification: "SIMULATED" })])).toBe("compiled");
-    expect(deriveLevel([...base, evidence("flashed", { verdict: "FAILURE" })])).toBe("compiled");
-    expect(deriveLevel([...base, evidence("flashed", { verification: "NOT_AVAILABLE" })])).toBe("compiled");
+  test("one failed criterion blocks observed", () => {
+    const evidenceList = [
+      ...base(),
+      evidence("observed", { criterion: "seriale" }),
+      evidence("observed", { criterion: "log", verdict: "FAILURE" }),
+    ];
+    expect(deriveLevel(evidenceList, ["seriale", "log"])).toBe("flashed");
+    expect(deriveStatus(evidenceList, deriveLevel(evidenceList, ["seriale", "log"]))).toBe("FAILURE");
+  });
+
+  test("one criterion that was never evaluated blocks observed", () => {
+    const evidenceList = [...base(), evidence("observed", { criterion: "seriale" })];
+    expect(deriveLevel(evidenceList, ["seriale", "log"])).toBe("flashed");
+  });
+
+  test("a simulated observation never counts", () => {
+    const evidenceList = [
+      ...base(),
+      evidence("observed", { criterion: "seriale", verification: "SIMULATED" }),
+    ];
+    expect(deriveLevel(evidenceList, ["seriale"])).toBe("flashed");
+  });
+
+  test("observed requires the criteria list: no profile means no observed", () => {
+    const evidenceList = [...base(), evidence("observed", { criterion: "seriale" })];
+    expect(deriveLevel(evidenceList)).toBe("flashed");
+  });
+
+  test("confirmed requires a human actor, not an agent or a tool", () => {
+    const complete = [
+      ...base(),
+      evidence("observed", { criterion: "seriale" }),
+    ];
+    expect(deriveLevel([...complete, evidence("confirmed", { actor: "tool" })], ["seriale"])).toBe(
+      "observed",
+    );
+    expect(deriveLevel([...complete, evidence("confirmed", { actor: "agent", actorId: "claude" })], ["seriale"])).toBe(
+      "observed",
+    );
+    expect(
+      deriveLevel(
+        [...complete, evidence("confirmed", { actor: "human", actorId: "mario.rossi" })],
+        ["seriale"],
+      ),
+    ).toBe("confirmed");
   });
 
   test("qualifies is strict about REAL + SUCCESS", () => {
     expect(qualifies(evidence("compiled"), "compiled")).toBe(true);
     expect(qualifies(evidence("compiled", { verification: "SIMULATED" }), "compiled")).toBe(false);
     expect(qualifies(evidence("compiled", { verdict: "UNKNOWN" }), "compiled")).toBe(false);
-    expect(qualifies(evidence("confirmed", { source: "tool" }), "confirmed")).toBe(false);
+    expect(qualifies(evidence("confirmed", { actor: "tool" }), "confirmed")).toBe(false);
+  });
+
+  test("observed evidence alone is not SUCCESS without the criteria list", () => {
+    const partial = [...base(), evidence("observed", { criterion: "seriale" })];
+    expect(deriveStatus(partial)).toBe("UNKNOWN");
   });
 
   test("status is derived: compiled-only is UNKNOWN, observed is SUCCESS", () => {
     expect(deriveStatus([])).toBe("UNKNOWN");
     expect(deriveStatus([evidence("written"), evidence("compiled")])).toBe("UNKNOWN");
-    expect(
-      deriveStatus([
-        evidence("written"),
-        evidence("compiled"),
-        evidence("flashed"),
-        evidence("observed"),
-      ]),
-    ).toBe("SUCCESS");
+    const observed = [...base(), evidence("observed", { criterion: "seriale" })];
+    expect(deriveStatus(observed, deriveLevel(observed, ["seriale"]))).toBe("SUCCESS");
     expect(deriveStatus([evidence("written"), evidence("compiled", { verdict: "FAILURE" })])).toBe(
       "FAILURE",
     );

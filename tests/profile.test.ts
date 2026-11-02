@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { editableAnchors, loadProfile } from "../core/profile";
+import { editableAnchors, loadProfile, profileCriteria } from "../core/profile";
 
 const BASE = [
   "prodotto: DEMO-BOARD-01",
@@ -66,6 +66,77 @@ describe("product profile", () => {
     expect(errorsOf(BASE.replace("interfaccia: swd", "interfaccia: spi"))).toContain(
       "flash.interfaccia",
     );
+  });
+
+  test("accepts the Zephyr adapter only when the board is declared", () => {
+    const zephyr = BASE.replace(
+      'build: { sistema: cmake, toolchain: arm-none-eabi-gcc, comando: "cmake --build build" }',
+      'board: demo_board\nbuild: { sistema: zephyr-west, toolchain: arm-zephyr-eabi-gcc, comando: "west build" }',
+    );
+    const result = loadProfile(zephyr);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.profile.build.sistema).toBe("zephyr-west");
+      expect(result.profile.board).toBe("demo_board");
+    }
+
+    const withoutBoard = BASE.replace(
+      'build: { sistema: cmake, toolchain: arm-none-eabi-gcc, comando: "cmake --build build" }',
+      'build: { sistema: zephyr-west, toolchain: arm-zephyr-eabi-gcc, comando: "west build" }',
+    );
+    expect(errorsOf(withoutBoard)).toContain("board");
+  });
+
+  test("rejects an unknown flash tool", () => {
+    expect(errorsOf(BASE.replace("tool: STM32_Programmer_CLI", "tool: st-flash"))).toContain(
+      "flash.tool",
+    );
+  });
+
+  test("requires a target for probe-rs and openocd", () => {
+    const probe = BASE.replace(
+      "flash: { tool: STM32_Programmer_CLI, interfaccia: swd }",
+      "flash: { tool: probe-rs, interfaccia: swd }",
+    );
+    expect(errorsOf(probe)).toContain("flash.target");
+
+    const openocd = BASE.replace(
+      "flash: { tool: STM32_Programmer_CLI, interfaccia: swd }",
+      "flash: { tool: openocd, interfaccia: jtag }",
+    );
+    expect(errorsOf(openocd)).toContain("flash.target");
+  });
+
+  test("parses an optional serial section", () => {
+    const result = loadProfile(
+      `${BASE}seriale: { porta: "/dev/ttyUSB0", baud: 115200, comando: "cat {porta}" }`,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.profile.seriale).toEqual({
+        porta: "/dev/ttyUSB0",
+        baud: 115200,
+        comando: "cat {porta}",
+      });
+    }
+  });
+
+  test("rejects an impossible baud rate", () => {
+    expect(errorsOf(`${BASE}seriale: { porta: "/dev/ttyUSB0", baud: 7 }`)).toContain(
+      "seriale.baud",
+    );
+  });
+
+  test("criterion ids are stable and indexed", () => {
+    const result = loadProfile(BASE);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(profileCriteria(result.profile).map((criterion) => criterion.id)).toEqual([
+        "seriale_contiene[0]",
+        "log_non_contiene[1]",
+        "test_su_target[2]",
+      ]);
+    }
   });
 
   test("rejects duplicate anchors", () => {
