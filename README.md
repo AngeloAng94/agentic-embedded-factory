@@ -1,256 +1,95 @@
-# EmbedFactory
+# PY Bench Agent
 
-Agentic workspace that turns a firmware requirement into a versioned project
-skeleton, validated patches and **real** build evidence for Zephyr / FreeRTOS.
+An autonomous agent for microcontroller firmware: it writes code, **compiles it with
+the real toolchain**, checks it against the chip, and reports only what a tool
+actually measured. If it cannot prove something, it says so and leaves the
+repository as it found it.
 
-**Workflow diagram** — one glance: who does what, where the loop starts, what
-comes out: [`docs/workflow.png`](docs/workflow.png) (preview) ·
-[`docs/workflow.pdf`](docs/workflow.pdf) (single A3 page, vector).
-Regenerate with `bun docs/render-workflow.ts`.
+The product is not the generated code — models already write code. The product is
+that the agent **cannot claim anything it has not measured**.
 
-**System map** — the longer written overview (pipeline, control plane, states):
-[`docs/infographic.pdf`](docs/infographic.pdf) · [`docs/infographic-a4.pdf`](docs/infographic-a4.pdf).
-Regenerate with `bun docs/render-infographic.ts`.
+> **State: Phase 1 complete** (structure and honesty-preserving extraction).
+> The CLI, the MCP server, flashing and the profile format do not exist yet; see
+> [What is not here yet](#what-is-not-here-yet). Nothing in this README describes
+> them as working.
 
-## The honesty rule
+## Non-negotiable rules
 
-The product never claims that something was compiled, tested or verified when
-that did not really happen. Every result carries two fields:
+| Rule | Where it is enforced today |
+| --- | --- |
+| `SUCCESS` only with `verification = REAL` **and** `exitCode = 0` | `core/buildStatus.ts`, `core/buildDispatch.ts` (a runner claiming otherwise is downgraded to `UNKNOWN`) |
+| Every result carries `verification` (`REAL`/`SIMULATED`/`NOT_AVAILABLE`) and `verdict` (`SUCCESS`/`FAILURE`/`UNKNOWN`) | `core/types.ts` |
+| A project is `verified` only after a real successful build | `core/buildStatus.ts → projectStatusFor` |
+| No build runner → `NOT_AVAILABLE`, never a simulated success | `core/buildDispatch.ts` |
+| The model proposes; only validated patches reach the files, all-or-nothing | `agent/turn.ts` |
+| Repair stops at 3 attempts, then the run fails and says so | `agent/repairLoop.ts` |
+| The LLM answer never decides a verdict | `agent/repairLoop.ts` (verdicts come from the build result only) |
 
-| Field            | Values                                        |
-| ---------------- | --------------------------------------------- |
-| `verification`   | `REAL` · `SIMULATED` · `NOT_AVAILABLE`        |
-| `verdict`        | `SUCCESS` · `FAILURE` · `UNKNOWN`             |
+Not yet implemented, and deliberately absent from the code: flashing, on-target
+observation, memory-map checking, block-scoped patching, `ModelRuntime`.
 
-- `SUCCESS` is only possible with `verification = REAL` **and** `exitCode = 0`
-  (a runner answer that claims otherwise is downgraded to `UNKNOWN`).
-- A missing toolchain produces `NOT_AVAILABLE · UNKNOWN` with
-  `reason: toolchain unavailable: "west" is not installed or not in PATH`.
-- A project becomes `verified` only after a real, successful build; otherwise it
-  stays `unverified` (the legacy `ready` status is never written again).
-- Rows created by the removed simulated engine are displayed as `LEGACY · UNVERIFIED`.
-
-## Architecture
+## Layout
 
 ```
-WEB (Vite + React + Convex)
-  queries/mutations  → authorized data access (ownership enforced server-side)
-  agent action       → server-side LLM + patch validation + build dispatch
-  build job          → BUILD_RUNNER_URL → runner → real Zephyr/FreeRTOS toolchain
-  export             → real ZIP built in the browser (files + README + manifest)
-  control plane      → Dashboard · Environment · Settings, fed by real probes
-
-RUNNER (bun runner/index.ts)  ← the ONLY component that runs native toolchains
-  doctor | verify | build | git | analyze | export | serve
+core/          types, verdicts, build engine + dispatch, LLM client (Ollama /
+               OpenAI-compatible), unified diff + path safety, doctor, artifact
+               inspection, project export, static safety analysis
+agent/         turn.ts        one Convex-free turn: prompt → plan → validated writes
+               repairLoop.ts  the loop: build → compiler error → patch → rebuild
+tools/runner/  local HTTP runner (build / doctor / export / turn) and Zephyr
+               end-to-end verification. Transitional: Phase 3/5 replace it with
+               MCP tools invoked in-process.
+tests/         104 tests, 1 gated on a real Zephyr toolchain
+samples/       reference Zephyr project used by the verification tests
+legacy/        frozen EmbedFactory v1 snapshot — excluded from build, lint, tests
 ```
 
-Convex cannot execute `west`/`cmake`, so the web app never fakes a build: without
-a runner it reports `NOT_AVAILABLE` and the exported project can be built
-locally. The desktop app (Electron) uses the same runner commands.
+`legacy/embedfactory-v1/` is a byte-for-byte copy of the previous product (Convex
+backend, web workspace, desktop app) with a SHA-256 manifest. It is kept intact on
+purpose: see [legacy/README.md](legacy/README.md).
 
-## Agent loop
-
-```
-user prompt → knowledge retrieval (logged) → LLM (server-side)
-            → patches validated against current content (all-or-nothing)
-            → real build → real compiler output
-            → on failure: compiler stdout/stderr/exit code go back to the model
-            → rebuild (max 3 attempts) → BUILD FAILED / REPAIR LIMIT REACHED
-```
-
-- Existing files are edited with **unified diffs**; a diff whose context does not
-  match exactly is rejected with `PATCH_FAILED` and nothing is written.
-- Every applied change is stored as an immutable version (`v1..vn`) with
-  timestamp, author, reason, patch and build verdict; any version can be restored.
-- If the provider is unreachable the turn fails explicitly: **no files created,
-  no file modified, no build started**.
-
-## Real Zephyr toolchain (the vertical slice)
-
-The engine is proven against a **real** toolchain on the machine that owns one.
-Nothing in this repository simulates a Zephyr build.
-
-### 1. Install prerequisites
-
-- `west`, `cmake`, `ninja`, `python3`, `dtc` (`sudo apt install cmake ninja-build
-  device-tree-compiler python3-dev` + `pipx install west`)
-- the **Zephyr SDK** (`ZEPHYR_SDK_INSTALL_DIR`, includes `arm-zephyr-eabi-gcc`)
-
-### 2. Install Zephyr
-
-```bash
-west init ~/zephyrproject && cd ~/zephyrproject && west update
-```
-
-### 3. Configure the environment
-
-```bash
-export ZEPHYR_BASE=~/zephyrproject/zephyr
-export ZEPHYR_SDK_INSTALL_DIR=~/zephyr-sdk-0.16.5
-```
-
-### 4. Run the doctor (never falls back to a simulated build)
-
-```bash
-bun runner/index.ts doctor
-```
-
-```
-EmbedFactory Environment
-
-west             PASS   West version: v1.2.0
-cmake            PASS   cmake version 3.28.3
-ninja            PASS   ninja found
-python           PASS   Python 3.11.6
-dtc              PASS   devicetree compiler found
-ZEPHYR_BASE      PASS   /home/me/zephyrproject/zephyr (from ZEPHYR_BASE)
-Zephyr SDK       PASS   /home/me/zephyr-sdk-0.16.5 (0.16.5)
-arm-zephyr-eabi  PASS   arm-zephyr-eabi-gcc 12.2.0
-board            PASS   "nucleo_l476rg" recognised by west (312 boards)
-
-Environment      READY
-```
-
-```
-Environment      NOT_READY
-
-Missing:
-- west
-- ZEPHYR_BASE
-```
-
-### 5. Start the runner (web/desktop builds go through it)
-
-```bash
-bun runner/index.ts serve --port 8790 --token <secret>
-# then: BUILD_RUNNER_URL=http://127.0.0.1:8790, BUILD_RUNNER_TOKEN=<secret>
-```
-
-`GET /health` is a fast probe (filesystem lookups only); `GET /doctor` runs the
-full diagnostic.
-
-### 6. Create a project, then build it
-
-The reference, reproducible project lives in [`samples/zephyr-blink`](samples/zephyr-blink)
-(`CMakeLists.txt`, `prj.conf`, `src/main.c` — portable Zephyr APIs only, so it
-builds for whatever upstream board you pass).
-
-```bash
-bun runner/index.ts build --dir ~/zephyrproject/embedfactory-ref \
-  --rtos zephyr --board nucleo_l476rg --json
-```
-
-`west build` really runs, from the correct working directory, and the result
-tells the truth:
-
-```
-REAL · SUCCESS · exitCode=0
-command    west build -b nucleo_l476rg -d build -p auto
-artifacts  build/zephyr/zephyr.elf  123456 B  ELF  sha256:…  ARM
-memory     FLASH 41236 B / 256 KB · RAM 9536 B / 64 KB
-```
-
-### 7. Prove failure → repair → success end to end
-
-```bash
-bun runner/index.ts verify --board nucleo_l476rg
-```
-
-This builds the reference project with an intentional wrong Zephyr API, shows
-the **real** GCC/linker error, applies the corrective patch (through the
-configured LLM when `LLM_*` is set, otherwise deterministically), rebuilds, and
-validates the resulting `zephyr.elf` (size, sha256, format, ELF header) plus the
-FLASH/RAM usage and the ZIP export manifest — which carries the board profile:
-
-```json
-{
-  "rtos": "zephyr",
-  "board": "nucleo_l476rg",
-  "toolchain": "West version: v1.2.0",
-  "verification": "REAL · SUCCESS",
-  "verdict": "SUCCESS"
-}
-```
-
-If the Zephyr toolchain is not installed the command prints
-`SKIPPED — Zephyr toolchain unavailable` and exits non-zero. It never fabricates
-a build.## Control plane (Dashboard · Environment · Settings)
-
-The UI always answers one question: **what is ready, what is not, and why.**
-
-| Level           | What it shows                                                                 |
-| --------------- | ----------------------------------------------------------------------------- |
-| **Dashboard**   | `Welcome to EmbedFactory` → `New Firmware` / `Existing Firmware` (disabled: import is not implemented), then `SYSTEM STATUS` for AI · Build runner · Zephyr · FreeRTOS · Toolchain, then the first-run checklist (`Connect AI` → `Check build runner` → `Zephyr toolchain` → `FreeRTOS`). Every status row links to Environment. |
-| **Environment** | The real diagnostics: AI (provider, model, connection, last check), build runner (URL, status, tools reported by `GET /health`), the Zephyr doctor table (west, cmake, ninja, python, dtc, `ZEPHYR_BASE`, Zephyr SDK, `arm-zephyr-eabi`, board), board detection and the raw doctor output. **Run diagnostics** really calls `GET /doctor` on the runner. |
-| **Settings**     | The server-side configuration (AI/LLM, build runner) with a real **Test connection** (one generation request) and a real **Test runner** (`GET /health`). Secrets are shown as *Configured* / *Not configured* only. |
-
-Inside a project a strip always shows `AI · BUILD · RTOS · BOARD` with the
-reason whenever something is not ready (e.g. `BUILD NOT AVAILABLE — reason:
-BUILD_RUNNER_URL is not set`).
-
-Nothing is inferred:
-
-- `CONNECTED` requires a real answer from the provider/runner;
-- `READY` for Zephyr requires a doctor report with every required check `PASS`;
-- a board is `READY` only if `west boards` really listed it, otherwise
-  `UNKNOWN / NOT VERIFIED` or `NOT_READY`;
-- FreeRTOS is `NOT_CONFIGURED`, because no FreeRTOS doctor exists yet;
-- a stored probe is discarded as soon as the configuration it probed changes.
-
-## Environment variables (server-side only)
-
-Every variable is documented with its purpose and default in
-[`ENVIRONMENT.md`](ENVIRONMENT.md) — the same catalogue the Settings page
-renders (`ENV_VAR_DOCS` in `src/lib/core/environmentStatus.ts`), so docs and UI
-cannot drift apart. The short version:
-
-| Variable                       | Purpose                                                   |
-| ------------------------------ | --------------------------------------------------------- |
-| `LLM_PROVIDER`                 | `ollama` (default) or `openai` (any OpenAI-compatible API) |
-| `LLM_BASE_URL`                 | e.g. `http://localhost:11434` or `https://api.openai.com/v1` |
-| `LLM_API_KEY`                  | **secret** — required for remote OpenAI-compatible endpoints |
-| `LLM_MODEL`                    | model name (default `llama3` / `gpt-4o-mini`)              |
-| `LLM_TIMEOUT_MS`, `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` | provider tuning          |
-| `BUILD_RUNNER_URL`             | runner HTTP endpoint (`bun runner/index.ts serve`)         |
-| `BUILD_RUNNER_TOKEN`           | **secret** — shared secret for the runner                  |
-| `ZEPHYR_BASE`, `ZEPHYR_SDK_INSTALL_DIR`, `EMBEDFACTORY_BOARD`, `EMBEDFACTORY_BUILD_COMMAND` | runner-side toolchain settings |
-
-Secrets are read with `process.env` inside Convex node actions / the runner, are
-never sent to the browser, never written to `localStorage` and never included in
-an API response or a log line.
-
-
-## Development
+## Commands
 
 ```bash
 bun install
-bun convex dev --once      # push functions + regenerate types
-bun tsc -b --noEmit        # typecheck
-bun test                   # authz, patches, statuses, safety, runner, export, doctor
-bun runner/index.ts doctor                 # is this machine able to build firmware?
-bun runner/index.ts verify --board nucleo_l476rg   # real failure -> repair -> success
+bun test                     # 103 pass, 1 skip (needs a real Zephyr toolchain)
+bunx tsc -b --noEmit         # typecheck
+bun run lint                 # eslint
+
+bun run doctor               # real toolchain probe; reports MISSING, never invents
+bun run runner:serve         # local build runner on 127.0.0.1:8790 (see tools/runner/README.md)
 ```
 
-The same report is what **Environment → Run diagnostics** fetches over
-`GET /doctor`, and what the Dashboard's `SYSTEM STATUS` summarizes.
+The runner needs `west`/`cmake`/`arm-none-eabi-gcc` on the machine. Without them
+every build answer is `NOT_AVAILABLE · UNKNOWN` with the reason, which is the
+intended behaviour.
 
-## Tests
+## How the loop reports
 
-`bun test` covers: cross-user authorization on every handler, path sandboxing,
-unified-diff validation (`PATCH_FAILED`), LLM failure isolation, honest build
-statuses, the repair loop and limit, real process execution (real compiler,
-real exit codes, real artifacts), runner CLI contract, ZIP validity (verified
-with Python's `zipfile`), knowledge retrieval budget and the safety rules.
+`agent/repairLoop.ts` has no database and no Convex dependency: persistence goes
+through `RepairLoopPorts` (`applyWrites`, `record`, `onBuildRecorded`, `say`).
+It returns a `RepairLoopResult` whose `status` is one of `ANSWER_ONLY`,
+`CHANGES_APPLIED`, `SUCCESS`, `BUILD_NOT_AVAILABLE`, or a failure code such as
+`PATCH_FAILED`, `REPAIR_LIMIT_REACHED`, `TIME_BUDGET_EXHAUSTED`.
 
-The control plane has its own suite (`src/__tests__/environmentStatus.test.ts`):
-environment status normalization, LLM configured/not-configured, secret masking
-(`Configured` / `Not configured`, and that a key or token never appears in a
-resolved status), runner states, toolchain aggregation, board availability,
-first-run checklist and the project environment query (a stale probe from a
-different runner is discarded, never recycled).
+The adapter that stores runs must derive project state from the recorded build
+(`isVerifiedSuccess` / `projectStatusFor`), never from the model's prose. That
+contract is what Phase 2 turns into a validated run record.
 
-The Zephyr-specific tests are **gated on the real toolchain**: they parse the
-ELF header from real bytes, parse a real linker memory report, and — when the
-environment is READY — run `west build` for a genuine
-failure → repair → success cycle. On a machine without Zephyr they report
-`SKIPPED — Zephyr toolchain unavailable` instead of a fake PASS.
+## Legacy snapshot and the `embedfactory-v1` tag
+
+The tag could **not** be created here: git commands are blocked in this
+environment. The snapshot directory plus `MANIFEST.sha256` is the substitute, and
+`legacy/README.md` contains the exact commands to recreate a real tag on a machine
+where git works. This is a known gap, not a completed step.
+
+## What is not here yet
+
+Phases 2–9 of the plan: validated run record, `profiles/py.yaml`, block-scoped
+patching (`// [AI_START_…]`), STM32 tooling (flash, double `read_state`, GDB batch,
+serial capture, `target_test`), memory map check, MCP server, `ModelRuntime`
+orchestrator (Claude Agent SDK + the existing `core/llmClient.ts`), `py job` CLI,
+demo.
+
+The web workspace and the landing page were removed from the active tree on
+purpose: this is a bench/CI tool now, not a web app. There is no dev server.
